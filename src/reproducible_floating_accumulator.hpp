@@ -22,15 +22,28 @@
 #pragma once
 
 #include <algorithm>
-#include <array>
 #include <climits>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 
+#ifndef __CUDACC__
+#define __host__
+#define __device__
+#include <array>
+using std::array;
+using std::min;
+using std::max;
+#else
+#include <cuda/std/array>
+using cuda::std::array;
+using cuda::std::min;
+using cuda::std::max;
+#endif
+
 ///Class to hold a reproducible summation of the numbers passed to it
 ///
-///@param ftype Floating-point data type; either `float` or `double`
+///@param ftype Floating-point data type; either `float` or `double
 ///@param FOLD  The fold; use 3 as a default unless you understand it.
 template<
   class ftype,
@@ -39,7 +52,7 @@ template<
 >
 class ReproducibleFloatingAccumulator {
  private:
-  std::array<ftype, 2*FOLD> data = {0};
+  array<ftype, 2*FOLD> data = {0};
 
   ///Floating-point precision bin width
   static constexpr auto BIN_WIDTH = std::is_same<ftype, double>::value ? 40 : 13;
@@ -66,8 +79,8 @@ class ReproducibleFloatingAccumulator {
   static constexpr auto ENDURANCE = 1 << (MANT_DIG - BIN_WIDTH - 2);
 
   ///Generates binned floating-point reference bins
-  static constexpr std::array<ftype, MAXINDEX + MAXFOLD> initialize_bins(){
-    std::array<ftype, MAXINDEX + MAXFOLD> bins{0};
+  __host__ __device__ static array<ftype, MAXINDEX + MAXFOLD> initialize_bins(){
+    array<ftype, MAXINDEX + MAXFOLD> bins{0};
 
     if(std::is_same<ftype, float>::value){
       bins[0] = std::ldexp(0.75, MAX_EXP);
@@ -86,37 +99,38 @@ class ReproducibleFloatingAccumulator {
   }
 
   ///The binned floating-point reference bins
-  static constexpr auto bins = initialize_bins();
+  //static inline auto bins = initialize_bins();
+  array<ftype, MAXINDEX + MAXFOLD> bins = initialize_bins();
 
   ///Return a binned floating-point reference bin
-  static inline constexpr const ftype* binned_bins(const int x) {
+  __host__ __device__ inline const ftype* binned_bins(const int x) const {
     return &bins[x];
   }
 
   ///Get the bit representation of a float
-  static inline uint32_t& get_bits(float &x)       { return *reinterpret_cast<      uint32_t*>(&x);}
+  __host__ __device__ static inline uint32_t& get_bits(float &x)       { return *reinterpret_cast<      uint32_t*>(&x);}
   ///Get the bit representation of a double
-  static inline uint64_t& get_bits(double &x)      { return *reinterpret_cast<      uint64_t*>(&x);}
+  __host__ __device__ static inline uint64_t& get_bits(double &x)      { return *reinterpret_cast<      uint64_t*>(&x);}
   ///Get the bit representation of a const float
-  static inline uint32_t  get_bits(const float &x) { return *reinterpret_cast<const uint32_t*>(&x);}
+  __host__ __device__ static inline uint32_t  get_bits(const float &x) { return *reinterpret_cast<const uint32_t*>(&x);}
   ///Get the bit representation of a const double
-  static inline uint64_t  get_bits(const double &x){ return *reinterpret_cast<const uint64_t*>(&x);}
+  __host__ __device__ static inline uint64_t  get_bits(const double &x){ return *reinterpret_cast<const uint64_t*>(&x);}
 
   ///Return a pointer to the primary vector
-  inline ftype*       pvec()       { return &data[0];    }
+  __host__ __device__ inline ftype*       pvec()       { return &data[0];    }
   ///Return a pointer to the carry vector
-  inline ftype*       cvec()       { return &data[FOLD]; }
+  __host__ __device__ inline ftype*       cvec()       { return &data[FOLD]; }
   ///Return a const pointer to the primary vector
-  inline const ftype* pvec() const { return &data[0];    }
+  __host__ __device__ inline const ftype* pvec() const { return &data[0];    }
   ///Return a const pointer to the carry vector
-  inline const ftype* cvec() const { return &data[FOLD]; }
+  __host__ __device__ inline const ftype* cvec() const { return &data[FOLD]; }
 
-  static inline constexpr int ISNANINF(const ftype x) {
+  __host__ __device__ static inline constexpr int ISNANINF(const ftype x) {
     const auto bits = get_bits(x);
     return (bits & ((2ull * MAX_EXP - 1) << (MANT_DIG - 1))) == ((2ull * MAX_EXP - 1) << (MANT_DIG - 1));
   }
 
-  static inline constexpr int EXP(const ftype x) {
+  __host__ __device__ static inline constexpr int EXP(const ftype x) {
     const auto bits = get_bits(x);
     return (bits >> (MANT_DIG - 1)) & (2 * MAX_EXP - 1);
   }
@@ -125,14 +139,14 @@ class ReproducibleFloatingAccumulator {
   ///The index of a non-binned type is the smallest index a binned type would
   ///need to have to sum it reproducibly. Higher indicies correspond to smaller
   ///bins.
-  static inline constexpr int binned_dindex(const ftype x){
+  __host__ __device__ static inline constexpr int binned_dindex(const ftype x){
     int exp = EXP(x);
     if(exp == 0){
       if(x == 0.0){
         return MAXINDEX;
       } else {
         frexp(x, &exp);
-        return std::min((MAX_EXP - exp)/BIN_WIDTH, MAXINDEX);
+        return min((MAX_EXP - exp)/BIN_WIDTH, MAXINDEX);
       }
     }
     return ((MAX_EXP + EXP_BIAS) - exp)/BIN_WIDTH;
@@ -141,13 +155,13 @@ class ReproducibleFloatingAccumulator {
   ///Get index of manually specified binned double precision
   ///The index of a binned type is the bin that it corresponds to. Higher
   ///indicies correspond to smaller bins.
-  inline int binned_index() const {
+  __host__ __device__ inline int binned_index() const {
     return ((MAX_EXP + MANT_DIG - BIN_WIDTH + 1 + EXP_BIAS) - EXP(pvec()[0]))/BIN_WIDTH;
   }
 
   ///Check if index of manually specified binned floating-point is 0
   ///A quick check to determine if the index is 0
-  inline bool binned_index0() const {
+  __host__ __device__ inline bool binned_index0() const {
     return EXP(pvec()[0]) == MAX_EXP + EXP_BIAS;
   }
 
@@ -158,7 +172,7 @@ class ReproducibleFloatingAccumulator {
   ///
   ///@param incpriY stride within Y's primary vector (use every incpriY'th element)
   ///@param inccarY stride within Y's carry vector (use every inccarY'th element)
-  void binned_dmdupdate(const ftype max_abs_val, const int incpriY, const int inccarY) {
+  __host__ __device__ void binned_dmdupdate(const ftype max_abs_val, const int incpriY, const int inccarY) {
     int i;
     int j;
     int X_index;
@@ -199,7 +213,7 @@ class ReproducibleFloatingAccumulator {
   ///larger than the index of @p X
   ///
   ///@param incpriY stride within Y's primary vector (use every incpriY'th element)
-  void binned_dmddeposit(const ftype X, const int incpriY){
+  __host__ __device__ void binned_dmddeposit(const ftype X, const int incpriY){
     ftype M;
     int i;
     ftype x = X;
@@ -259,7 +273,7 @@ class ReproducibleFloatingAccumulator {
   ///
   ///@param incpriX stride within X's primary vector (use every incpriX'th element)
   ///@param inccarX stride within X's carry vector (use every inccarX'th element)
-  void binned_dmrenorm(const int incpriX, const int inccarX) {
+  __host__ __device__ void binned_dmrenorm(const int incpriX, const int inccarX) {
     auto *priX = pvec();
     auto *carX = cvec();
 
@@ -285,7 +299,7 @@ class ReproducibleFloatingAccumulator {
   ///
   ///@param incpriY stride within Y's primary vector (use every incpriY'th element)
   ///@param inccarY stride within Y's carry vector (use every inccarY'th element)
-  void binned_dmdadd(const ftype X, const int incpriY, const int inccarY){
+  __host__ __device__ void binned_dmdadd(const ftype X, const int incpriY, const int inccarY){
     binned_dmdupdate(X, incpriY, inccarY);
     binned_dmddeposit(X, incpriY);
     binned_dmrenorm(incpriY, inccarY);
@@ -295,7 +309,7 @@ class ReproducibleFloatingAccumulator {
   ///
   ///@param incpriX stride within X's primary vector (use every incpriX'th element)
   ///@param inccarX stride within X's carry vector (use every inccarX'th element)
-  double binned_conv_double(const int incpriX, const int inccarX) const {
+  __host__ __device__ double binned_conv_double(const int incpriX, const int inccarX) const {
     int i = 0;
 
     const auto *const priX = pvec();
@@ -318,7 +332,7 @@ class ReproducibleFloatingAccumulator {
     if(X_index <= (3 * MANT_DIG)/BIN_WIDTH){
       scale_down = ldexp(0.5, 1 - (2 * MANT_DIG - BIN_WIDTH));
       scale_up = ldexp(0.5, 1 + (2 * MANT_DIG - BIN_WIDTH));
-      scaled = std::max(std::min(FOLD, (3 * MANT_DIG)/BIN_WIDTH - X_index), 0);
+      scaled = max(min(FOLD, (3 * MANT_DIG)/BIN_WIDTH - X_index), 0);
       if(X_index == 0){
         Y += carX[0] * ((bins[0]/6.0) * scale_down * EXPANSION);
         Y += carX[inccarX] * ((bins[1]/6.0) * scale_down);
@@ -360,7 +374,7 @@ class ReproducibleFloatingAccumulator {
   ///
   ///@param incpriX stride within X's primary vector (use every incpriX'th element)
   ///@param inccarX stride within X's carry vector (use every inccarX'th element)
-  float binned_conv_single(const int incpriX, const int inccarX) const {
+  __host__ __device__ float binned_conv_single(const int incpriX, const int inccarX) const {
     int i = 0;
     double Y = 0.0;
     const auto *const priX = pvec();
@@ -405,7 +419,7 @@ class ReproducibleFloatingAccumulator {
   ///@param inccarX stride within X's carry vector (use every inccarX'th element)
   ///@param incpriY stride within Y's primary vector (use every incpriY'th element)
   ///@param inccarY stride within Y's carry vector (use every inccarY'th element)
-  void binned_dmdmadd(const ReproducibleFloatingAccumulator &other, const int incpriX, const int inccarX, const int incpriY, const int inccarY) {
+  __host__ __device__ void binned_dmdmadd(const ReproducibleFloatingAccumulator &other, const int incpriX, const int inccarX, const int incpriY, const int inccarY) {
     auto *const priX = pvec();
     auto *const carX = cvec();
     auto *const priY = other.pvec();
@@ -472,14 +486,14 @@ class ReproducibleFloatingAccumulator {
   }
 
   ///Returns the number of reference bins. Used for judging memory usage.
-  static constexpr size_t number_of_reference_bins() {
+  constexpr size_t number_of_reference_bins() {
     return bins.size();
   }
 
   ///Accumulate an arithmetic @p x into the binned fp.
   ///NOTE: Casts @p x to the type of the binned fp
   template <typename U, typename std::enable_if<std::is_arithmetic<U>::value>::type* = nullptr>
-  ReproducibleFloatingAccumulator& operator+=(const U x){
+  __host__ __device__ ReproducibleFloatingAccumulator& operator+=(const U x){
     binned_dmdadd(static_cast<ftype>(x), 1, 1);
     return *this;
   }
@@ -487,52 +501,52 @@ class ReproducibleFloatingAccumulator {
   ///Accumulate-subtract an arithmetic @p x into the binned fp.
   ///NOTE: Casts @p x to the type of the binned fp
   template <typename U, typename std::enable_if<std::is_arithmetic<U>::value>::type* = nullptr>
-  ReproducibleFloatingAccumulator& operator-=(const U x){
+  __host__ __device__ ReproducibleFloatingAccumulator& operator-=(const U x){
     binned_dmdadd(-static_cast<ftype>(x), 1, 1);
     return *this;
   }
 
   ///Accumulate a binned fp @p x into the binned fp.
-  ReproducibleFloatingAccumulator& operator+=(const ReproducibleFloatingAccumulator &other){
+  __host__ __device__ ReproducibleFloatingAccumulator& operator+=(const ReproducibleFloatingAccumulator &other){
     binned_dbdbadd(other);
     return *this;
   }
 
   ///Accumulate-subtract a binned fp @p x into the binned fp.
   ///NOTE: Makes a copy and performs arithmetic; slow.
-  ReproducibleFloatingAccumulator& operator-=(const ReproducibleFloatingAccumulator &other){
+  __host__ __device__ ReproducibleFloatingAccumulator& operator-=(const ReproducibleFloatingAccumulator &other){
     const auto temp = -other;
     binned_dbdbadd(temp);
   }
 
   ///Determines if two binned fp are equal
-  bool operator==(const ReproducibleFloatingAccumulator &other) const {
+  __host__ __device__ bool operator==(const ReproducibleFloatingAccumulator &other) const {
     return data==other.data;
   }
 
   ///Determines if two binned fp are not equal
-  bool operator!=(const ReproducibleFloatingAccumulator &other) const {
+  __host__ __device__ bool operator!=(const ReproducibleFloatingAccumulator &other) const {
     return !operator==(other);
   }
 
   ///Sets this binned fp equal to the arithmetic value @p x
   ///NOTE: Casts @p x to the type of the binned fp
   template <typename U, typename std::enable_if<std::is_arithmetic<U>::value>::type* = nullptr>
-  ReproducibleFloatingAccumulator& operator=(const U x){
+  __host__ __device__ ReproducibleFloatingAccumulator& operator=(const U x){
     zero();
     binned_dmdadd(static_cast<ftype>(x), 1, 1);
     return *this;
   }
 
   ///Sets this binned fp equal to another binned fp
-  ReproducibleFloatingAccumulator& operator=(const ReproducibleFloatingAccumulator<ftype, FOLD> &o){
+  __host__ __device__ ReproducibleFloatingAccumulator& operator=(const ReproducibleFloatingAccumulator<ftype, FOLD> &o){
     data = o.data;
     return *this;
   }
 
   ///Returns the negative of this binned fp
   ///NOTE: Makes a copy and performs arithmetic; slow.
-  ReproducibleFloatingAccumulator operator-() {
+  __host__ __device__ ReproducibleFloatingAccumulator operator-() {
     constexpr int incpriX = 1;
     constexpr int inccarX = 1;
     ReproducibleFloatingAccumulator temp = *this;
@@ -547,7 +561,7 @@ class ReproducibleFloatingAccumulator {
   }
 
   ///Convert this binned fp into its native floating-point representation
-  ftype conv() const {
+  __host__ __device__ ftype conv() const {
     if(std::is_same<ftype, float>::value){
       return binned_conv_single(1, 1);
     } else {
@@ -568,11 +582,11 @@ class ReproducibleFloatingAccumulator {
   ) {
     const double X = std::abs(max_abs_val);
     const double S = std::abs(binned_sum);
-    return static_cast<ftype>(std::max(X, ldexp(0.5, MIN_EXP - 1)) * ldexp(0.5, (1 - FOLD) * BIN_WIDTH + 1) * N + ((7.0 * EPSILON) / (1.0 - 6.0 * std::sqrt(static_cast<double>(EPSILON)) - 7.0 * EPSILON)) * S);
+    return static_cast<ftype>(max(X, ldexp(0.5, MIN_EXP - 1)) * ldexp(0.5, (1 - FOLD) * BIN_WIDTH + 1) * N + ((7.0 * EPSILON) / (1.0 - 6.0 * std::sqrt(static_cast<double>(EPSILON)) - 7.0 * EPSILON)) * S);
   }
 
   ///Add @p x to the binned fp
-  void add(const ftype x){
+  __host__ __device__ void add(const ftype x){
     binned_dmdadd(x, 1, 1);
   }
 
@@ -582,7 +596,7 @@ class ReproducibleFloatingAccumulator {
   ///@param last        End of range
   ///@param max_abs_val Maximum absolute value of any member of the range
   template <typename InputIt>
-  void add(InputIt first, InputIt last, const ftype max_abs_val) {
+  __host__ __device__ void add(InputIt first, InputIt last, const ftype max_abs_val) {
     binned_dmdupdate(std::abs(max_abs_val), 1, 1);
     size_t count = 0;
     for(;first!=last;first++,count++){
@@ -603,7 +617,7 @@ class ReproducibleFloatingAccumulator {
   ///@param last        End of range
   template <typename InputIt>
   void add(InputIt first, InputIt last) {
-    const auto max_abs_val = *std::max_element(first, last, [](const auto &a, const auto &b){
+      const auto max_abs_val = *std::max_element(first, last, [](const auto &a, const auto &b){
       return std::abs(a) < std::abs(b);
     });
     add(first, last, static_cast<ftype>(max_abs_val));
@@ -615,7 +629,7 @@ class ReproducibleFloatingAccumulator {
   ///@param N           Number of elements to add
   ///@param max_abs_val Maximum absolute value of any member of the range
   template <typename T, typename std::enable_if<std::is_arithmetic<T>::value>::type* = nullptr>
-  void add(const T *input, const size_t N, const ftype max_abs_val) {
+  __host__ __device__ void add(const T *input, const size_t N, const ftype max_abs_val) {
     if(N==0){
       return;
     }
@@ -630,13 +644,13 @@ class ReproducibleFloatingAccumulator {
   ///@param input       Start of the range
   ///@param N           Number of elements to add
   template <typename T, typename std::enable_if<std::is_arithmetic<T>::value>::type* = nullptr>
-  void add(const T *input, const size_t N) {
+  __host__ __device__ void add(const T *input, const size_t N) {
     if(N==0){
       return;
     }
     T max_abs_val = input[0];
     for(size_t i=0;i<N;i++){
-      max_abs_val = std::max(max_abs_val, std::abs(input[i]));
+      max_abs_val = max(max_abs_val, std::abs(input[i]));
     }
     add(input, N, max_abs_val);
   }
@@ -651,14 +665,14 @@ class ReproducibleFloatingAccumulator {
   ///with `unsafe_add` after which `renorm()` must be called. See the source of
   ///`add()` for an example
   template <typename T, typename std::enable_if<std::is_arithmetic<T>::value>::type* = nullptr>
-  void set_max_abs_val(const T mav){
+  __host__ __device__ void set_max_abs_val(const T mav){
     binned_dmdupdate(std::abs(mav), 1, 1);
   }
 
   ///Add @p x to the binned fp
   ///
   ///This is intended to be used after a call to `set_max_abs_val()`
-  void unsafe_add(const ftype x){
+  __host__ __device__ void unsafe_add(const ftype x){
     binned_dmddeposit(x, 1);
   }
 
@@ -666,7 +680,7 @@ class ReproducibleFloatingAccumulator {
   ///
   ///This is intended to be used after a call to `set_max_abs_val()` and one or
   ///more calls to `unsafe_add()`
-  void renorm() {
+  __host__ __device__ void renorm() {
     binned_dmrenorm(1, 1);
   }
 };

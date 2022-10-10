@@ -1,6 +1,6 @@
 cmake_minimum_required (VERSION 3.9)
 
-project(deterministic LANGUAGES CXX)
+project(deterministic LANGUAGES CXX CUDA)
 
 find_package(OpenMP REQUIRED)
 
@@ -16,3 +16,9 @@ add_executable(ahrens2020
 )
 target_compile_features(ahrens2020 PRIVATE cxx_std_17)
 target_compile_options(ahrens2020 PRIVATE -Wall -pedantic)
+
+add_executable(ahrens2020_cuda
+  src/ahrens2020_cuda.cu
+)
+target_compile_features(ahrens2020_cuda PRIVATE cxx_std_17)
+target_compile_options(ahrens2020_cuda PRIVATE -Wall -Wextra) #pedantic --expt-relaxed-constexpr)
