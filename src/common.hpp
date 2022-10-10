@@ -51,8 +51,8 @@ std::ostream& operator<<(std::ostream& out, const binrep<T> a){
 
 //Kahan's compensated summation algorithm for accurately calculating sums of
 //many numbers with O(1) error
-template<class AccumType, class FloatType>
-FloatType serial_kahan_summation(const std::vector<FloatType> &vec){
+template<class AccumType, class VectorType>
+auto serial_kahan_summation(const VectorType &vec){
   AccumType sum = 0.0f;
   AccumType c = 0.0f;
   for (const auto &num: vec) {
@@ -68,11 +68,12 @@ FloatType serial_kahan_summation(const std::vector<FloatType> &vec){
 
 //Simple serial summation algorithm with an accumulation type we can specify
 //to more fully explore its behaviour
-template<class AccumType, class FloatType>
-FloatType serial_simple_summation(const std::vector<FloatType> &vec){
+template<class AccumType, class VectorType>
+auto serial_simple_summation(const VectorType &vec){
   AccumType sum = 0;
   for(const auto &x: vec){
     sum += x;
   }
   return sum;
 }
+

@@ -268,7 +268,7 @@ FloatType simple_summation(const std::vector<FloatType> &vec){
   if(Parallel){
     return parallel_simple_summation<FloatType, SimpleAccumType>(vec);
   } else {
-    return serial_simple_summation<SimpleAccumType, FloatType>(vec);
+    return serial_simple_summation<SimpleAccumType>(vec);
   }
 }
 
