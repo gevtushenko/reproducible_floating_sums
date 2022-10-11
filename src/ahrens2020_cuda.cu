@@ -8,9 +8,8 @@
 #include <thrust/device_vector.h>
 
 ///Tests summing many numbers one at a time without a known absolute value caps
-template <class FloatType>
-__global__ void kernel_1(FloatType *sum, FloatType *x, size_t N) {
-  ReproducibleFloatingAccumulator<FloatType> rfa;
+template <class FloatType, class Accumulator>
+__global__ void kernel_1(FloatType *sum, FloatType *x, size_t N, Accumulator rfa) {
   for (auto i = 0u; i < N; i++) {
     rfa += x[i];
   }
@@ -22,7 +21,8 @@ FloatType bitwise_deterministic_summation_1(const thrust::host_vector<FloatType>
 #if 1
   thrust::device_vector<FloatType> d_vec = vec;
   thrust::device_vector<FloatType> d_out(1);
-  kernel_1<FloatType><<<1, 1>>>(thrust::raw_pointer_cast(d_out.data()), thrust::raw_pointer_cast(d_vec.data()), vec.size());
+  ReproducibleFloatingAccumulator<FloatType> rfa;
+  kernel_1<FloatType><<<1, 1>>>(thrust::raw_pointer_cast(d_out.data()), thrust::raw_pointer_cast(d_vec.data()), vec.size(), rfa);
   thrust::host_vector<FloatType> out = d_out;
   return out[0];
 #else
@@ -35,9 +35,8 @@ FloatType bitwise_deterministic_summation_1(const thrust::host_vector<FloatType>
 }
 
 ///Tests summing many numbers without a known absolute value caps
-template <class FloatType>
-__global__ void kernel_many(FloatType *sum, FloatType *x, size_t N) {
-  ReproducibleFloatingAccumulator<FloatType> rfa;
+template <class FloatType, class Accumulator>
+__global__ void kernel_many(FloatType *sum, FloatType *x, size_t N, Accumulator rfa) {
   rfa.add(x, N);
   *sum = rfa.conv();
 }
@@ -47,7 +46,8 @@ FloatType bitwise_deterministic_summation_many(const thrust::host_vector<FloatTy
 #if 1
   thrust::device_vector<FloatType> d_vec = vec;
   thrust::device_vector<FloatType> d_out(1);
-  kernel_many<FloatType><<<1, 1>>>(thrust::raw_pointer_cast(d_out.data()), thrust::raw_pointer_cast(d_vec.data()), vec.size());
+  ReproducibleFloatingAccumulator<FloatType> rfa;
+  kernel_many<FloatType><<<1, 1>>>(thrust::raw_pointer_cast(d_out.data()), thrust::raw_pointer_cast(d_vec.data()), vec.size(), rfa);
   thrust::host_vector<FloatType> out = d_out;
   return out[0];
 #else
@@ -58,9 +58,8 @@ FloatType bitwise_deterministic_summation_many(const thrust::host_vector<FloatTy
 }
 
 ///Tests summing many numbers with a known absolute value caps
-template <class FloatType>
-__global__ void kernel_manyc(FloatType *sum, FloatType *x, size_t N, FloatType max_abs_val) {
-  ReproducibleFloatingAccumulator<FloatType> rfa;
+template <class FloatType, class Accumulator>
+__global__ void kernel_manyc(FloatType *sum, FloatType *x, size_t N, FloatType max_abs_val, Accumulator rfa) {
   rfa.add(x, N, max_abs_val);
   *sum = rfa.conv();
 }
@@ -70,7 +69,8 @@ FloatType bitwise_deterministic_summation_manyc(const thrust::host_vector<FloatT
 #if 1
   thrust::device_vector<FloatType> d_vec = vec;
   thrust::device_vector<FloatType> d_out(1);
-  kernel_manyc<FloatType><<<1, 1>>>(thrust::raw_pointer_cast(d_out.data()), thrust::raw_pointer_cast(d_vec.data()), vec.size(), max_abs_val);
+  ReproducibleFloatingAccumulator<FloatType> rfa;
+  kernel_manyc<FloatType><<<1, 1>>>(thrust::raw_pointer_cast(d_out.data()), thrust::raw_pointer_cast(d_vec.data()), vec.size(), max_abs_val, rfa);
   thrust::host_vector<FloatType> out = d_out;
   return out[0];
 #else

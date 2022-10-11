@@ -475,6 +475,9 @@ class ReproducibleFloatingAccumulator {
 
 
  public:
+  ReproducibleFloatingAccumulator() = default;
+  ReproducibleFloatingAccumulator(const ReproducibleFloatingAccumulator &) = default;
+
   ///Set the binned fp to zero
   void zero() {
     data = {0};
