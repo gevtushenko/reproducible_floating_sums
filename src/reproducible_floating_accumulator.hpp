@@ -46,12 +46,16 @@ using cuda::std::max;
 ///@param ftype Floating-point data type; either `float` or `double
 ///@param FOLD  The fold; use 3 as a default unless you understand it.
 template<
-  class ftype,
-  int FOLD = 3,
-  typename std::enable_if<std::is_floating_point<ftype>::value>::type* = nullptr
+  class ftype_,
+  int FOLD_ = 3,
+  typename std::enable_if<std::is_floating_point<ftype_>::value>::type* = nullptr
 >
 class ReproducibleFloatingAccumulator {
- private:
+public:
+  using ftype = ftype_;
+  static constexpr int FOLD = FOLD_;
+
+private:
   array<ftype, 2*FOLD> data = {0};
 
   ///Floating-point precision bin width
@@ -420,10 +424,10 @@ class ReproducibleFloatingAccumulator {
   ///@param incpriY stride within Y's primary vector (use every incpriY'th element)
   ///@param inccarY stride within Y's carry vector (use every inccarY'th element)
   __host__ __device__ void binned_dmdmadd(const ReproducibleFloatingAccumulator &other, const int incpriX, const int inccarX, const int incpriY, const int inccarY) {
-    auto *const priX = pvec();
-    auto *const carX = cvec();
-    auto *const priY = other.pvec();
-    auto *const carY = other.cvec();
+    auto *const priX = other.pvec();
+    auto *const carX = other.cvec();
+    auto *const priY = pvec();
+    auto *const carY = cvec();
 
     if (priX[0] == 0.0)
       return;
@@ -441,8 +445,8 @@ class ReproducibleFloatingAccumulator {
       return;
     }
 
-    const auto X_index = binned_index(priX);
-    const auto Y_index = binned_index(priY);
+    const auto X_index = other.binned_index();
+    const auto Y_index = this->binned_index();
     const auto shift = Y_index - X_index;
     if(shift > 0){
       const auto *const bins = binned_bins(Y_index);
@@ -469,7 +473,7 @@ class ReproducibleFloatingAccumulator {
 
   ///Add two manually specified binned fp (Y += X)
   ///Performs the operation Y += X
-  void binned_dbdbadd(const ReproducibleFloatingAccumulator &other){
+  __host__ __device__ void binned_dbdbadd(const ReproducibleFloatingAccumulator &other){
     binned_dmdmadd(other, 1, 1, 1, 1);
   }
 
