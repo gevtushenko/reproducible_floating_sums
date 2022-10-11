@@ -477,6 +477,8 @@ class ReproducibleFloatingAccumulator {
  public:
   ReproducibleFloatingAccumulator() = default;
   ReproducibleFloatingAccumulator(const ReproducibleFloatingAccumulator &) = default;
+  ///Sets this binned fp equal to another binned fp
+  ReproducibleFloatingAccumulator& operator=(const ReproducibleFloatingAccumulator &) = default;
 
   ///Set the binned fp to zero
   void zero() {
@@ -538,12 +540,6 @@ class ReproducibleFloatingAccumulator {
   __host__ __device__ ReproducibleFloatingAccumulator& operator=(const U x){
     zero();
     binned_dmdadd(static_cast<ftype>(x), 1, 1);
-    return *this;
-  }
-
-  ///Sets this binned fp equal to another binned fp
-  __host__ __device__ ReproducibleFloatingAccumulator& operator=(const ReproducibleFloatingAccumulator<ftype, FOLD> &o){
-    data = o.data;
     return *this;
   }
 
