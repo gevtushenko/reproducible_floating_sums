@@ -6,78 +6,113 @@
 #include <unordered_map>
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
+#include <cub/cub.cuh>
+
+constexpr int block_size = 128; // threads per block
+constexpr int M = 4;            // elements per thread array
+
+template <class Accumulator>
+__host__ __device__
+std::enable_if_t<std::is_same_v<Accumulator, ReproducibleFloatingAccumulator<typename Accumulator::ftype, Accumulator::FOLD>>, Accumulator>
+operator+(const Accumulator &lhs, const Accumulator &rhs)
+{
+  Accumulator rtn = lhs;
+  rtn += rhs;
+  return rtn;
+}
+
+template <int block_size, class T>
+__device__ auto block_sum(T value)
+{
+  // Specialize BlockReduce for a 1D block of 128 threads of type int
+  using BlockReduce = cub::BlockReduce<T, block_size>;
+  // Allocate shared memory for BlockReduce
+  __shared__ typename BlockReduce::TempStorage temp_storage;
+  // Compute the block-wide sum for thread0
+  return BlockReduce(temp_storage).Sum(value);
+}
 
 ///Tests summing many numbers one at a time without a known absolute value caps
-template <class FloatType, class Accumulator>
+template <class FloatType, int block_size, class Accumulator>
 __global__ void kernel_1(FloatType *sum, FloatType *x, size_t N, Accumulator rfa) {
-  for (auto i = 0u; i < N; i++) {
-    rfa += x[i];
-  }
-  *sum = rfa.conv();
+  auto tid = threadIdx.x;
+
+  // first do thread private reduction
+  for (auto i = tid; i < N; i+= blockDim.x) rfa += x[i];
+
+  // Compute the block-wide sum for thread0
+  auto aggregate = block_sum<block_size>(rfa);
+  if (tid == 0) *sum = aggregate.conv();
 }
 
 template<class FloatType>
 FloatType bitwise_deterministic_summation_1(const thrust::host_vector<FloatType> &vec){
-#if 1
   thrust::device_vector<FloatType> d_vec = vec;
   thrust::device_vector<FloatType> d_out(1);
   ReproducibleFloatingAccumulator<FloatType> rfa;
-  kernel_1<FloatType><<<1, 1>>>(thrust::raw_pointer_cast(d_out.data()), thrust::raw_pointer_cast(d_vec.data()), vec.size(), rfa);
+  kernel_1<FloatType, block_size><<<1, block_size>>>(thrust::raw_pointer_cast(d_out.data()), thrust::raw_pointer_cast(d_vec.data()), vec.size(), rfa);
   thrust::host_vector<FloatType> out = d_out;
   return out[0];
-#else
-  ReproducibleFloatingAccumulator<FloatType> rfa;
-  for(const auto &x: vec){
-    rfa += x;
-  }
-  return rfa.conv();
-#endif
 }
 
 ///Tests summing many numbers without a known absolute value caps
-template <class FloatType, class Accumulator>
+template <int block_size, int M, class FloatType, class Accumulator>
 __global__ void kernel_many(FloatType *sum, FloatType *x, size_t N, Accumulator rfa) {
-  rfa.add(x, N);
-  *sum = rfa.conv();
+  auto tid = threadIdx.x;
+
+  // first do thread private reduction
+  for (auto i = tid; i < N; i+= M * blockDim.x) {
+    FloatType y[M] = {};
+    for (auto j = 0; j < M; j++) {
+      y[j] = (i + j * blockDim.x) < N ? x[i + j * blockDim.x] : 0.0;
+    }
+    rfa.add(y, M);
+  }
+
+  // Compute the block-wide sum for thread0
+  auto aggregate = block_sum<block_size>(rfa);
+  if (tid == 0) *sum = aggregate.conv();
 }
 
 template<class FloatType>
 FloatType bitwise_deterministic_summation_many(const thrust::host_vector<FloatType> &vec){
-#if 1
   thrust::device_vector<FloatType> d_vec = vec;
   thrust::device_vector<FloatType> d_out(1);
   ReproducibleFloatingAccumulator<FloatType> rfa;
-  kernel_many<FloatType><<<1, 1>>>(thrust::raw_pointer_cast(d_out.data()), thrust::raw_pointer_cast(d_vec.data()), vec.size(), rfa);
+  kernel_many<block_size, M, FloatType><<<1, block_size>>>(thrust::raw_pointer_cast(d_out.data()), thrust::raw_pointer_cast(d_vec.data()), vec.size(), rfa);
   thrust::host_vector<FloatType> out = d_out;
   return out[0];
-#else
-  ReproducibleFloatingAccumulator<FloatType> rfa;
-  rfa.add(vec.begin(), vec.end());
-  return rfa.conv();
-#endif
 }
 
 ///Tests summing many numbers with a known absolute value caps
-template <class FloatType, class Accumulator>
+template <int block_size, int M, class FloatType, class Accumulator>
 __global__ void kernel_manyc(FloatType *sum, FloatType *x, size_t N, FloatType max_abs_val, Accumulator rfa) {
-  rfa.add(x, N, max_abs_val);
-  *sum = rfa.conv();
+  auto tid = threadIdx.x;
+
+  // first do thread private reduction
+  for (auto i = tid; i < N; i+= M * blockDim.x) {
+    FloatType y[M] = {};
+    FloatType max_y = 0.0;
+    for (auto j = 0; j < M; j++) {
+      y[j] = (i + j * blockDim.x) < N ? x[i + j * blockDim.x] : 0.0;
+      max_y = fabs(y[j]) > max_y ? fabs(y[j]) : max_y;
+    }
+    rfa.add(y, M, max_y);
+  }
+
+  // Compute the block-wide sum for thread0
+  auto aggregate = block_sum<block_size>(rfa);
+  if (tid == 0) *sum = aggregate.conv();
 }
 
 template<class FloatType>
 FloatType bitwise_deterministic_summation_manyc(const thrust::host_vector<FloatType> &vec, const FloatType max_abs_val){
-#if 1
   thrust::device_vector<FloatType> d_vec = vec;
   thrust::device_vector<FloatType> d_out(1);
   ReproducibleFloatingAccumulator<FloatType> rfa;
-  kernel_manyc<FloatType><<<1, 1>>>(thrust::raw_pointer_cast(d_out.data()), thrust::raw_pointer_cast(d_vec.data()), vec.size(), max_abs_val, rfa);
+  kernel_manyc<block_size, M, FloatType><<<1, block_size>>>(thrust::raw_pointer_cast(d_out.data()), thrust::raw_pointer_cast(d_vec.data()), vec.size(), max_abs_val, rfa);
   thrust::host_vector<FloatType> out = d_out;
   return out[0];
-#else
-  ReproducibleFloatingAccumulator<FloatType> rfa;
-  rfa.add(vec.begin(), vec.end(), max_abs_val);
-  return rfa.conv();
-#endif
 }
 
 
@@ -182,7 +217,7 @@ FloatType PerformTestsOnData(
   std::cout<<"Distinct Simple values               = "<<simple_sums.size()<<std::endl;
 
   for(const auto &kv: kahan_sums){
-    std::cout<<"Kahan sum values (N="<<std::fixed<<kv.second<<") "<<kv.first<<" ("<<binrep<FloatType>(kv.first)<<")"<<std::endl;
+    //std::cout<<"Kahan sum values (N="<<std::fixed<<kv.second<<") "<<kv.first<<" ("<<binrep<FloatType>(kv.first)<<")"<<std::endl;
   }
 
   for(const auto &kv: simple_sums){
@@ -224,7 +259,7 @@ void PerformTestsOnSineWaveData(const int N, const int TESTS){
 }
 
 int main(){
-  const int N = 10000;
+  const int N = 1'000'000;
   const int TESTS = 100;
 
   PerformTestsOnUniformRandom<float, float>(N, TESTS);
