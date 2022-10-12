@@ -41,6 +41,45 @@ using cuda::std::min;
 using cuda::std::max;
 #endif
 
+template <class ftype> struct RFA_bins
+{
+  static constexpr auto BIN_WIDTH = std::is_same<ftype, double>::value ? 40 : 13;
+  static constexpr auto MIN_EXP = std::numeric_limits<ftype>::min_exponent;
+  static constexpr auto MAX_EXP = std::numeric_limits<ftype>::max_exponent;
+  static constexpr auto MANT_DIG = std::numeric_limits<ftype>::digits;
+  ///Binned floating-point maximum index
+  static constexpr auto MAXINDEX = ((MAX_EXP - MIN_EXP + MANT_DIG - 1) / BIN_WIDTH) - 1;
+  //The maximum floating-point fold supported by the library
+  static constexpr auto MAXFOLD = MAXINDEX + 1;
+
+  ///The binned floating-point reference bins
+  array<ftype, MAXINDEX + MAXFOLD> bins = {};
+
+  constexpr ftype& operator[](int d) { return bins[d]; }
+
+  void initialize_bins() {
+    if constexpr (std::is_same_v<ftype, float>){
+      bins[0] = std::ldexp(0.75, MAX_EXP);
+    } else {
+      bins[0] = 2.0 * ldexp(0.75, MAX_EXP - 1);
+    }
+
+    for(int index = 1; index <= MAXINDEX; index++){
+      bins[index] = ldexp(0.75, MAX_EXP + MANT_DIG - BIN_WIDTH + 1 - index * BIN_WIDTH);
+    }
+    for(int index = MAXINDEX + 1; index < MAXINDEX + MAXFOLD; index++){
+      bins[index] = bins[index - 1];
+    }
+  }
+};
+
+static RFA_bins<double> bins_fp64;
+static RFA_bins<float> bins_fp32;
+#ifdef __CUDACC__
+__constant__ static RFA_bins<double> bins_fp64_d;
+__constant__ static RFA_bins<float> bins_fp32_d;
+#endif
+
 ///Class to hold a reproducible summation of the numbers passed to it
 ///
 ///@param ftype Floating-point data type; either `float` or `double
@@ -82,33 +121,15 @@ private:
   ///Applies also to binned complex double precision.
   static constexpr auto ENDURANCE = 1 << (MANT_DIG - BIN_WIDTH - 2);
 
-  ///Generates binned floating-point reference bins
-  __host__ __device__ static array<ftype, MAXINDEX + MAXFOLD> initialize_bins(){
-    array<ftype, MAXINDEX + MAXFOLD> bins{0};
-
-    if(std::is_same<ftype, float>::value){
-      bins[0] = std::ldexp(0.75, MAX_EXP);
-    } else {
-      bins[0] = 2.0 * ldexp(0.75, MAX_EXP - 1);
-    }
-
-    for(int index = 1; index <= MAXINDEX; index++){
-      bins[index] = ldexp(0.75, MAX_EXP + MANT_DIG - BIN_WIDTH + 1 - index * BIN_WIDTH);
-    }
-    for(int index = MAXINDEX + 1; index < MAXINDEX + MAXFOLD; index++){
-      bins[index] = bins[index - 1];
-    }
-
-    return bins;
-  }
-
-  ///The binned floating-point reference bins
-  //static inline auto bins = initialize_bins();
-  array<ftype, MAXINDEX + MAXFOLD> bins = initialize_bins();
-
   ///Return a binned floating-point reference bin
   __host__ __device__ inline const ftype* binned_bins(const int x) const {
-    return &bins[x];
+#ifdef __CUDACC__
+    if constexpr (std::is_same_v<ftype, float>) return &bins_fp32_d[x];
+    else return &bins_fp64_d[x];
+#else
+    if constexpr (std::is_same_v<ftype, float>) return &bins_fp32[x];
+    else return &bins_fp64[x];
+#endif
   }
 
   ///Get the bit representation of a float
@@ -485,7 +506,7 @@ private:
   ReproducibleFloatingAccumulator& operator=(const ReproducibleFloatingAccumulator &) = default;
 
   ///Set the binned fp to zero
-  void zero() {
+  __host__ __device__ void zero() {
     data = {0};
   }
 
@@ -496,7 +517,13 @@ private:
 
   ///Returns the number of reference bins. Used for judging memory usage.
   constexpr size_t number_of_reference_bins() {
-    return bins.size();
+#ifdef __CUDACC__
+    if constexpr (std::is_same_v<ftype, float>) return bins_fp32_d.bins.size();
+    else return bins_fp64_d.bins.size();
+#else
+    if constexpr (std::is_same_v<ftype, float>) return bins_fp32.bins.size();
+    else return bins_fp64.bins.size();
+#endif
   }
 
   ///Accumulate an arithmetic @p x into the binned fp.
@@ -565,7 +592,7 @@ private:
 
   ///Convert this binned fp into its native floating-point representation
   __host__ __device__ ftype conv() const {
-    if(std::is_same<ftype, float>::value){
+    if(std::is_same_v<ftype, float>){
       return binned_conv_single(1, 1);
     } else {
       return binned_conv_double(1, 1);
