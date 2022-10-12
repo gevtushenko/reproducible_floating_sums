@@ -170,6 +170,11 @@ FloatType PerformTestsOnData(
   Timer time_kahan;
   Timer time_simple;
 
+  // create bins on host and copy to device
+  RFA_bins<FloatType> bins;
+  bins.initialize_bins();
+  CHECK_CUDA(cudaMemcpyToSymbol(bin_device_buffer, &bins, sizeof(bins), 0, cudaMemcpyHostToDevice));
+
   // result buffer setup
   FloatType *result_h;
   FloatType *result_d;
@@ -331,12 +336,6 @@ void PerformTestsOnSineWaveData(const int N, const int TESTS){
 int main(){
   const int N = 1'000'000;
   const int TESTS = 100;
-
-  // create bins on host and copy to device
-  bins_fp64.initialize_bins();
-  bins_fp32.initialize_bins();
-  CHECK_CUDA(cudaMemcpyToSymbol(bins_fp64_d, &bins_fp64, sizeof(bins_fp64), 0, cudaMemcpyHostToDevice));
-  CHECK_CUDA(cudaMemcpyToSymbol(bins_fp32_d, &bins_fp32, sizeof(bins_fp32), 0, cudaMemcpyHostToDevice));
 
   PerformTestsOnUniformRandom<float, float>(N, TESTS);
   PerformTestsOnUniformRandom<double, double>(N, TESTS);

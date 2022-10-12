@@ -133,11 +133,11 @@ FloatType PerformTestsOnData(
   std::cout<<"Distinct Kahan values                = "<<kahan_sums.size()<<std::endl;
   std::cout<<"Distinct Simple values               = "<<simple_sums.size()<<std::endl;
 
+#if 0
   for(const auto &kv: kahan_sums){
     std::cout<<"Kahan sum values (N="<<std::fixed<<kv.second<<") "<<kv.first<<" ("<<binrep<FloatType>(kv.first)<<")"<<std::endl;
   }
 
-#if 0
   for(const auto &kv: simple_sums){
     std::cout<<"Simple sum values (N="<<std::fixed<<kv.second<<") "<<kv.first<<" ("<<binrep<FloatType>(kv.first)<<")"<<std::endl;
   }
@@ -179,9 +179,6 @@ void PerformTestsOnSineWaveData(const int N, const int TESTS){
 int main(){
   const int N = 1'000'000;
   const int TESTS = 100;
-
-  bins_fp64.initialize_bins();
-  bins_fp32.initialize_bins();
 
   PerformTestsOnUniformRandom<float, float>(N, TESTS);
   PerformTestsOnUniformRandom<double, double>(N, TESTS);

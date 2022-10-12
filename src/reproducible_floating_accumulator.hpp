@@ -73,11 +73,8 @@ template <class ftype> struct RFA_bins
   }
 };
 
-static RFA_bins<double> bins_fp64;
-static RFA_bins<float> bins_fp32;
 #ifdef __CUDACC__
-__constant__ static RFA_bins<double> bins_fp64_d;
-__constant__ static RFA_bins<float> bins_fp32_d;
+__constant__ static char bin_device_buffer[sizeof(RFA_bins<double>)];
 #endif
 
 ///Class to hold a reproducible summation of the numbers passed to it
@@ -124,11 +121,15 @@ private:
   ///Return a binned floating-point reference bin
   __host__ __device__ inline const ftype* binned_bins(const int x) const {
 #ifdef __CUDACC__
-    if constexpr (std::is_same_v<ftype, float>) return &bins_fp32_d[x];
-    else return &bins_fp64_d[x];
+    return &reinterpret_cast<RFA_bins<ftype>&>(bin_device_buffer)[x];
 #else
-    if constexpr (std::is_same_v<ftype, float>) return &bins_fp32[x];
-    else return &bins_fp64[x];
+    static RFA_bins<ftype> bins;
+    static bool init = false;
+    if (!init) {
+      bins.initialize_bins();
+      init = true;
+    }
+    return &bins[x];
 #endif
   }
 
@@ -517,13 +518,7 @@ private:
 
   ///Returns the number of reference bins. Used for judging memory usage.
   constexpr size_t number_of_reference_bins() {
-#ifdef __CUDACC__
-    if constexpr (std::is_same_v<ftype, float>) return bins_fp32_d.bins.size();
-    else return bins_fp64_d.bins.size();
-#else
-    if constexpr (std::is_same_v<ftype, float>) return bins_fp32.bins.size();
-    else return bins_fp64.bins.size();
-#endif
+    return array<ftype, MAXINDEX + MAXFOLD>::size();
   }
 
   ///Accumulate an arithmetic @p x into the binned fp.
