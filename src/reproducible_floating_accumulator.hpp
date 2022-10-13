@@ -41,6 +41,12 @@ using cuda::std::min;
 using cuda::std::max;
 #endif
 
+// disable nan / infinity checks
+#define DISABLE_NANINF
+
+// jump table for indexing into data
+//#define JUMP
+
 template <class ftype> struct RFA_bins
 {
   static constexpr auto BIN_WIDTH = std::is_same<ftype, double>::value ? 40 : 13;
@@ -142,18 +148,53 @@ private:
   ///Get the bit representation of a const double
   __host__ __device__ static inline uint64_t  get_bits(const double &x){ return *reinterpret_cast<const uint64_t*>(&x);}
 
-  ///Return a pointer to the primary vector
-  __host__ __device__ inline ftype*       pvec()       { return &data[0];    }
-  ///Return a pointer to the carry vector
-  __host__ __device__ inline ftype*       cvec()       { return &data[FOLD]; }
-  ///Return a const pointer to the primary vector
-  __host__ __device__ inline const ftype* pvec() const { return &data[0];    }
-  ///Return a const pointer to the carry vector
-  __host__ __device__ inline const ftype* cvec() const { return &data[FOLD]; }
+  ///Return primary vector value ref
+  template <int n = 0>  __host__ __device__ ftype& primary(int i) {
+#ifndef JUMP
+    return data[i];
+#else
+    if (i == n) return data[n];
+    else if constexpr (n < FOLD -1) return primary<n + 1>(i);
+#endif
+  }
+
+  ///Return carry vector value ref
+  template <int n = 0> __host__ __device__ ftype& carry(int i) {
+#ifndef JUMP
+    return data[i + FOLD];
+#else
+    if (i == n) return data[n + FOLD];
+    else if constexpr (n < FOLD - 1) return carry<n + 1>(i);
+#endif
+  }
+
+  ///Return primary vector value const ref
+  template <int n = 0> __host__ __device__ const ftype& primary(int i) const {
+#ifndef JUMP
+    return data[i];
+#else
+    if (i == n) return data[n];
+    else if constexpr (n < FOLD -1) return primary<n + 1>(i);
+#endif
+  }
+
+  ///Return carry vector value const ref
+  template <int n = 0>  __host__ __device__ const ftype& carry(int i) const {
+#ifndef JUMP
+    return data[i + FOLD];
+#else
+    if (i == n) return data[n + FOLD];
+    else if constexpr (n < FOLD - 1) return carry<n + 1>(i);
+#endif
+  }
 
   __host__ __device__ static inline constexpr int ISNANINF(const ftype x) {
+#ifdef DISABLE_NANINF
+    return false;
+#else
     const auto bits = get_bits(x);
     return (bits & ((2ull * MAX_EXP - 1) << (MANT_DIG - 1))) == ((2ull * MAX_EXP - 1) << (MANT_DIG - 1));
+#endif
   }
 
   __host__ __device__ static inline constexpr int EXP(const ftype x) {
@@ -182,13 +223,13 @@ private:
   ///The index of a binned type is the bin that it corresponds to. Higher
   ///indicies correspond to smaller bins.
   __host__ __device__ inline int binned_index() const {
-    return ((MAX_EXP + MANT_DIG - BIN_WIDTH + 1 + EXP_BIAS) - EXP(pvec()[0]))/BIN_WIDTH;
+    return ((MAX_EXP + MANT_DIG - BIN_WIDTH + 1 + EXP_BIAS) - EXP(primary(0)))/BIN_WIDTH;
   }
 
   ///Check if index of manually specified binned floating-point is 0
   ///A quick check to determine if the index is 0
   __host__ __device__ inline bool binned_index0() const {
-    return EXP(pvec()[0]) == MAX_EXP + EXP_BIAS;
+    return EXP(primary(0)) == MAX_EXP + EXP_BIAS;
   }
 
   ///Update manually specified binned fp with a scalar (X -> Y)
@@ -203,31 +244,29 @@ private:
     int j;
     int X_index;
     int shift;
-    auto *const priY = pvec();
-    auto *const carY = cvec();
 
-    if (ISNANINF(priY[0])){
+    if (ISNANINF(primary(0))){
       return;
     }
 
     X_index = binned_dindex(max_abs_val);
-    if(priY[0] == 0.0){
+    if(primary(0) == 0.0){
       const ftype *const bins = binned_bins(X_index);
       for(i = 0; i < FOLD; i++){
-        priY[i * incpriY] = bins[i];
-        carY[i * inccarY] = 0.0;
+        primary(i * incpriY) = bins[i];
+        carry(i * inccarY) = 0.0;
       }
     }else{
       shift = binned_index() - X_index;
       if(shift > 0){
-        for(i = FOLD - 1; i >= shift; i--){
-          priY[i * incpriY] = priY[(i - shift) * incpriY];
-          carY[i * inccarY] = carY[(i - shift) * inccarY];
+        for(i = FOLD - 1; i >= shift; i--){ // spill here ?
+          primary(i * incpriY) = primary((i - shift) * incpriY);
+          carry(i * inccarY) = carry((i - shift) * inccarY);
         }
         const ftype *const bins = binned_bins(X_index);
         for(j = 0; j < i + 1; j++){
-          priY[j * incpriY] = bins[j];
-          carY[j * inccarY] = 0.0;
+          primary(j * incpriY) = bins[j];
+          carry(j * inccarY) = 0.0;
         }
       }
     }
@@ -243,51 +282,50 @@ private:
     ftype M;
     int i;
     ftype x = X;
-    auto *const priY = pvec();
 
-    if(ISNANINF(x) || ISNANINF(priY[0])){
-      priY[0] += x;
+    if(ISNANINF(x) || ISNANINF(primary(0))){
+      primary(0) += x;
       return;
     }
 
     if(binned_index0()){
-      M = priY[0];
+      M = primary(0);
       ftype qd = x * COMPRESSION;
       auto& ql = get_bits(qd);
       ql |= 1;
       qd += M;
-      priY[0] = qd;
+      primary(0) = qd;
       M -= qd;
       M *= EXPANSION * 0.5;
       x += M;
       x += M;
       for (i = 1; i < FOLD - 1; i++) {
-        M = priY[i * incpriY];
+        M = primary(i * incpriY);
         qd = x;
         ql |= 1;
         qd += M;
-        priY[i * incpriY] = qd;
+        primary(i * incpriY) = qd;
         M -= qd;
         x += M;
       }
       qd = x;
       ql |= 1;
-      priY[i * incpriY] += qd;
+      primary(i * incpriY) += qd;
     } else {
       ftype qd = x;
       auto& ql = get_bits(qd);
       for (i = 0; i < FOLD - 1; i++) {
-        M = priY[i * incpriY];
+        M = primary(i * incpriY);
         qd = x;
         ql |= 1;
         qd += M;
-        priY[i * incpriY] = qd;
+        primary(i * incpriY) = qd;
         M -= qd;
         x += M;
       }
       qd = x;
       ql |= 1;
-      priY[i * incpriY] += qd;
+      primary(i * incpriY) += qd;
     }
   }
 
@@ -300,22 +338,19 @@ private:
   ///@param incpriX stride within X's primary vector (use every incpriX'th element)
   ///@param inccarX stride within X's carry vector (use every inccarX'th element)
   __host__ __device__ void binned_dmrenorm(const int incpriX, const int inccarX) {
-    auto *priX = pvec();
-    auto *carX = cvec();
-
-    if(priX[0] == 0.0 || ISNANINF(priX[0])){
+    if(primary(0) == 0.0 || ISNANINF(primary(0))){
       return;
     }
 
-    for (int i = 0; i < FOLD; i++, priX += incpriX, carX += inccarX) {
-      auto tmp_renormd = priX[0];
+    for (int i = 0; i < FOLD; i++) {//, priX += incpriX, carX += inccarX) {
+      auto tmp_renormd = primary(i * incpriX);
       auto& tmp_renorml = get_bits(tmp_renormd);
 
-      carX[0] += (int)((tmp_renorml >> (MANT_DIG - 3)) & 3) - 2;
+      carry(i * inccarX) += (int)((tmp_renorml >> (MANT_DIG - 3)) & 3) - 2;
 
       tmp_renorml &= ~(1ull << (MANT_DIG - 3));
       tmp_renorml |= 1ull << (MANT_DIG - 2);
-      priX[0] = tmp_renormd;
+      primary(i * incpriX) = tmp_renormd;
     }
   }
 
@@ -338,14 +373,11 @@ private:
   __host__ __device__ double binned_conv_double(const int incpriX, const int inccarX) const {
     int i = 0;
 
-    const auto *const priX = pvec();
-    const auto *const carX = cvec();
-
-    if (ISNANINF(priX[0])){
-      return priX[0];
+    if (ISNANINF(primary(0))){
+      return primary(0);
     }
 
-    if (priX[0] == 0.0) {
+    if (primary(0) == 0.0) {
       return 0.0;
     }
 
@@ -360,20 +392,20 @@ private:
       scale_up = ldexp(0.5, 1 + (2 * MANT_DIG - BIN_WIDTH));
       scaled = max(min(FOLD, (3 * MANT_DIG)/BIN_WIDTH - X_index), 0);
       if(X_index == 0){
-        Y += carX[0] * ((bins[0]/6.0) * scale_down * EXPANSION);
-        Y += carX[inccarX] * ((bins[1]/6.0) * scale_down);
-        Y += (priX[0] - bins[0]) * scale_down * EXPANSION;
+        Y += carry(0) * ((bins[0]/6.0) * scale_down * EXPANSION);
+        Y += carry(inccarX) * ((bins[1]/6.0) * scale_down);
+        Y += (primary(0) - bins[0]) * scale_down * EXPANSION;
         i = 2;
       }else{
-        Y += carX[0] * ((bins[0]/6.0) * scale_down);
+        Y += carry(0) * ((bins[0]/6.0) * scale_down);
         i = 1;
       }
       for(; i < scaled; i++){
-        Y += carX[i * inccarX] * ((bins[i]/6.0) * scale_down);
-        Y += (priX[(i - 1) * incpriX] - bins[i - 1]) * scale_down;
+        Y += carry(i * inccarX) * ((bins[i]/6.0) * scale_down);
+        Y += (primary((i - 1) * incpriX) - bins[i - 1]) * scale_down;
       }
       if(i == FOLD){
-        Y += (priX[(FOLD - 1) * incpriX] - bins[FOLD - 1]) * scale_down;
+        Y += (primary((FOLD - 1) * incpriX) - bins[FOLD - 1]) * scale_down;
         return Y * scale_up;
       }
       if(std::isinf(Y * scale_up)){
@@ -381,17 +413,17 @@ private:
       }
       Y *= scale_up;
       for(; i < FOLD; i++){
-        Y += carX[i * inccarX] * (bins[i]/6.0);
-        Y += priX[(i - 1) * incpriX] - bins[i - 1];
+        Y += carry(i * inccarX) * (bins[i]/6.0);
+        Y += primary((i - 1) * incpriX) - bins[i - 1];
       }
-      Y += priX[(FOLD - 1) * incpriX] - bins[FOLD - 1];
+      Y += primary((FOLD - 1) * incpriX) - bins[FOLD - 1];
     }else{
-      Y += carX[0] * (bins[0]/6.0);
+      Y += carry(0) * (bins[0]/6.0);
       for(i = 1; i < FOLD; i++){
-        Y += carX[i * inccarX] * (bins[i]/6.0);
-        Y += (priX[(i - 1) * incpriX] - bins[i - 1]);
+        Y += carry(i * inccarX) * (bins[i]/6.0);
+        Y += (primary((i - 1) * incpriX) - bins[i - 1]);
       }
-      Y += (priX[(FOLD - 1) * incpriX] - bins[FOLD - 1]);
+      Y += (primary((FOLD - 1) * incpriX) - bins[FOLD - 1]);
     }
     return Y;
   }
@@ -403,14 +435,12 @@ private:
   __host__ __device__ float binned_conv_single(const int incpriX, const int inccarX) const {
     int i = 0;
     double Y = 0.0;
-    const auto *const priX = pvec();
-    const auto *const carX = cvec();
 
-    if (ISNANINF(priX[0])){
-      return priX[0];
+    if (ISNANINF(primary(0))){
+      return primary(0);
     }
 
-    if (priX[0] == 0.0) {
+    if (primary(0) == 0.0) {
       return 0.0;
     }
 
@@ -420,19 +450,19 @@ private:
     const auto X_index = binned_index();
     const auto *const bins = binned_bins(X_index);
     if(X_index == 0){
-      Y += (double)carX[0] * (double)(bins[0]/6.0) * (double)EXPANSION;
-      Y += (double)carX[inccarX] * (double)(bins[1]/6.0);
-      Y += (double)(priX[0] - bins[0]) * (double)EXPANSION;
+      Y += (double)carry(0) * (double)(bins[0]/6.0) * (double)EXPANSION;
+      Y += (double)carry(inccarX) * (double)(bins[1]/6.0);
+      Y += (double)(primary(0) - bins[0]) * (double)EXPANSION;
       i = 2;
     }else{
-      Y += (double)carX[0] * (double)(bins[0]/6.0);
+      Y += (double)carry(0) * (double)(bins[0]/6.0);
       i = 1;
     }
     for(; i < FOLD; i++){
-      Y += (double)carX[i * inccarX] * (double)(bins[i]/6.0);
-      Y += (double)(priX[(i - 1) * incpriX] - bins[i - 1]);
+      Y += (double)carry(i * inccarX) * (double)(bins[i]/6.0);
+      Y += (double)(primary((i - 1) * incpriX) - bins[i - 1]);
     }
-    Y += (double)(priX[(FOLD - 1) * incpriX] - bins[FOLD - 1]);
+    Y += (double)(primary((FOLD - 1) * incpriX) - bins[FOLD - 1]);
 
     return (float)Y;
   }
@@ -445,48 +475,43 @@ private:
   ///@param inccarX stride within X's carry vector (use every inccarX'th element)
   ///@param incpriY stride within Y's primary vector (use every incpriY'th element)
   ///@param inccarY stride within Y's carry vector (use every inccarY'th element)
-  __host__ __device__ void binned_dmdmadd(const ReproducibleFloatingAccumulator &other, const int incpriX, const int inccarX, const int incpriY, const int inccarY) {
-    auto *const priX = other.pvec();
-    auto *const carX = other.cvec();
-    auto *const priY = pvec();
-    auto *const carY = cvec();
-
-    if (priX[0] == 0.0)
+  __host__ __device__ void binned_dmdmadd(const ReproducibleFloatingAccumulator &x, const int incpriX, const int inccarX, const int incpriY, const int inccarY) {
+    if (x.primary(0) == 0.0)
       return;
 
-    if (priY[0] == 0.0) {
+    if (primary(0) == 0.0) {
       for (int i = 0; i < FOLD; i++) {
-        priY[i*incpriY] = priX[i*incpriX];
-        carY[i*inccarY] = carX[i*inccarX];
+        primary(i*incpriY) = x.primary(i*incpriX);
+        carry(i*inccarY) = x.carry(i*inccarX);
       }
       return;
     }
 
-    if (ISNANINF(priX[0]) || ISNANINF(priY[0])){
-      priY[0] += priX[0];
+    if (ISNANINF(x.primary(0)) || ISNANINF(primary(0))){
+      primary(0) += x.primary(0);
       return;
     }
 
-    const auto X_index = other.binned_index();
+    const auto X_index = x.binned_index();
     const auto Y_index = this->binned_index();
     const auto shift = Y_index - X_index;
     if(shift > 0){
       const auto *const bins = binned_bins(Y_index);
       //shift Y upwards and add X to Y
       for (int i = FOLD - 1; i >= shift; i--) {
-        priY[i*incpriY] = priX[i*incpriX] + (priY[(i - shift)*incpriY] - bins[i - shift]);
-        carY[i*inccarY] = carX[i*inccarX] + carY[(i - shift)*inccarY];
+        primary(i*incpriY) = x.primary(i*incpriX) + (primary((i - shift)*incpriY) - bins[i - shift]);
+        carry(i*inccarY) = x.carry(i*inccarX) + carry((i - shift)*inccarY);
       }
       for (int i = 0; i < shift && i < FOLD; i++) {
-        priY[i*incpriY] = priX[i*incpriX];
-        carY[i*inccarY] = carX[i*inccarX];
+        primary(i*incpriY) = x.primary(i*incpriX);
+        carry(i*inccarY) = x.carry(i*inccarX);
       }
     }else{
       const auto *const bins = binned_bins(X_index);
       //shift X upwards and add X to Y
       for (int i = 0 - shift; i < FOLD; i++) {
-        priY[i*incpriY] += priX[(i + shift)*incpriX] - bins[i + shift];
-        carY[i*inccarY] += carX[(i + shift)*inccarX];
+        primary(i*incpriY) += x.primary((i + shift)*incpriX) - bins[i + shift];
+        carry(i*inccarY) += x.carry((i + shift)*inccarX);
       }
     }
 
@@ -575,11 +600,11 @@ private:
     constexpr int incpriX = 1;
     constexpr int inccarX = 1;
     ReproducibleFloatingAccumulator temp = *this;
-    if(pvec()[0] != 0.0){
+    if(primary(0) != 0.0){
       const auto *const bins = binned_bins(binned_index());
       for (int i = 0; i < FOLD; i++) {
-        temp.pvec()[i * incpriX] = bins[i] - (pvec()[i * incpriX] - bins[i]);
-        temp.cvec()[i * inccarX] = -cvec()[i * inccarX];
+        temp.primary(i * incpriX) = bins[i] - (primary(i * incpriX) - bins[i]);
+        temp.carry(i * inccarX) = -carry(i * inccarX);
       }
     }
     return temp;
