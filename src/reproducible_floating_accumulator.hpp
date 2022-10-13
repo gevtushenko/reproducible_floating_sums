@@ -188,14 +188,14 @@ private:
 #endif
   }
 
-  __host__ __device__ static inline constexpr int ISNANINF(const ftype x) {
 #ifdef DISABLE_NANINF
-    return false;
+  __host__ __device__ static inline constexpr int ISNANINF(const ftype) { return false; }
 #else
+  __host__ __device__ static inline constexpr int ISNANINF(const ftype x) {
     const auto bits = get_bits(x);
     return (bits & ((2ull * MAX_EXP - 1) << (MANT_DIG - 1))) == ((2ull * MAX_EXP - 1) << (MANT_DIG - 1));
-#endif
   }
+#endif
 
   __host__ __device__ static inline constexpr int EXP(const ftype x) {
     const auto bits = get_bits(x);

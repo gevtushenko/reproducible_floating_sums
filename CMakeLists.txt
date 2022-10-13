@@ -21,4 +21,4 @@ add_executable(ahrens2020_cuda
   src/ahrens2020_cuda.cu
 )
 target_compile_features(ahrens2020_cuda PRIVATE cxx_std_17)
-target_compile_options(ahrens2020_cuda PRIVATE -Wall -Wextra --expt-relaxed-constexpr)
+target_compile_options(ahrens2020_cuda PRIVATE -Wall -Wextra --expt-relaxed-constexpr -Xptxas="-v" -lineinfo)
