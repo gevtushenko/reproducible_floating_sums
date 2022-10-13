@@ -46,6 +46,11 @@ FloatType PerformTestsOnData(
   Timer time_kahan;
   Timer time_simple;
 
+  // create bins
+  RFA_bins<FloatType> bins;
+  bins.initialize_bins();
+  memcpy(bin_host_buffer, &bins, sizeof(bins));
+
   //Very precise output
   std::cout.precision(std::numeric_limits<FloatType>::max_digits10);
   std::cout<<std::fixed;

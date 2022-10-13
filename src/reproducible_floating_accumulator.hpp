@@ -79,6 +79,7 @@ template <class ftype> struct RFA_bins
   }
 };
 
+static char bin_host_buffer[sizeof(RFA_bins<double>)];
 #ifdef __CUDACC__
 __constant__ static char bin_device_buffer[sizeof(RFA_bins<double>)];
 #endif
@@ -126,16 +127,10 @@ private:
 
   ///Return a binned floating-point reference bin
   __host__ __device__ inline const ftype* binned_bins(const int x) const {
-#ifdef __CUDACC__
+#ifdef __CUDA_ARCH__ // must be arch not CC here
     return &reinterpret_cast<RFA_bins<ftype>&>(bin_device_buffer)[x];
 #else
-    static RFA_bins<ftype> bins;
-    static bool init = false;
-    if (!init) {
-      bins.initialize_bins();
-      init = true;
-    }
-    return &bins[x];
+    return &reinterpret_cast<RFA_bins<ftype>&>(bin_host_buffer)[x];
 #endif
   }
 

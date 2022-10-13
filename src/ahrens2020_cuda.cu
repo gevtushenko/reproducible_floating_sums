@@ -34,6 +34,8 @@ operator+(const Accumulator &lhs, const Accumulator &rhs)
 
 __device__ unsigned int count = 0;
 
+// we can make this much better by first computing the block wide max
+// and then summing
 template <int block_size, class T>
 __device__ auto block_sum(T value)
 {
@@ -45,13 +47,13 @@ __device__ auto block_sum(T value)
   return BlockReduce(temp_storage).Sum(value);
 }
 
-template <int block_size, class FloatType, class RFA_t, class index_t>
-__device__ void reduce(FloatType *result, RFA_t *partial, RFA_t &rfa, index_t tid)
+template <int block_size, class RFA_t, class index_t>
+__device__ void reduce(RFA_t *result, RFA_t *partial, RFA_t &rfa, index_t tid)
 {
-  if (gridDim.x == 1) {
+  if constexpr (grid_size == 1) {
 
     auto aggregate = block_sum<block_size>(rfa);
-    if (tid == 0) *result = aggregate.conv();
+    if (tid == 0) *result = aggregate;
 
   } else {
 
@@ -79,7 +81,7 @@ __device__ void reduce(FloatType *result, RFA_t *partial, RFA_t &rfa, index_t ti
       }
 
       auto aggregate = block_sum<block_size>(rfa);
-      if (threadIdx.x == 0) *result = aggregate.conv();
+      if (threadIdx.x == 0) *result = aggregate;
 
       count = 0; // reset counter
     }
@@ -89,7 +91,7 @@ __device__ void reduce(FloatType *result, RFA_t *partial, RFA_t &rfa, index_t ti
 
 ///Tests summing many numbers one at a time without a known absolute value caps
 template <class FloatType, int block_size, class RFA_t>
-__global__ void kernel_1(FloatType *result, RFA_t *partial, const FloatType * const x, size_t N) {
+__global__ void kernel_1(RFA_t *result, RFA_t *partial, const FloatType * const x, size_t N) {
   auto tid = blockDim.x * blockIdx.x + threadIdx.x;
   RFA_t rfa;
 
@@ -101,14 +103,14 @@ __global__ void kernel_1(FloatType *result, RFA_t *partial, const FloatType * co
 }
 
 template<class FloatType, class RFA_t>
-void bitwise_deterministic_summation_1(FloatType *result_d, RFA_t *partial_d, const thrust::device_vector<FloatType> &vec_d){
+void bitwise_deterministic_summation_1(RFA_t *result_d, RFA_t *partial_d, const thrust::device_vector<FloatType> &vec_d){
   kernel_1<FloatType, block_size><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size());
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
 ///Tests summing many numbers without a known absolute value caps
 template <int block_size, int M, class FloatType, class RFA_t>
-__global__ void kernel_many(FloatType *result, RFA_t *partial, const FloatType * const x, size_t N) {
+__global__ void kernel_many(RFA_t *result, RFA_t *partial, const FloatType * const x, size_t N) {
   auto tid = blockDim.x * blockIdx.x + threadIdx.x;
   RFA_t rfa;
 
@@ -126,14 +128,14 @@ __global__ void kernel_many(FloatType *result, RFA_t *partial, const FloatType *
 }
 
 template<class FloatType, class RFA_t>
-void bitwise_deterministic_summation_many(FloatType *result_d, RFA_t *partial_d, const thrust::device_vector<FloatType> &vec_d){
+void bitwise_deterministic_summation_many(RFA_t *result_d, RFA_t *partial_d, const thrust::device_vector<FloatType> &vec_d){
   kernel_many<block_size, M, FloatType><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size());
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
 ///Tests summing many numbers with a known absolute value caps
 template <int block_size, int M, class FloatType, class RFA_t>
-__global__ void kernel_manyc(FloatType *result, RFA_t *partial, const FloatType * const x, size_t N, FloatType max_abs_val) {
+__global__ void kernel_manyc(RFA_t *result, RFA_t *partial, const FloatType * const x, size_t N, FloatType max_abs_val) {
   auto tid = blockDim.x * blockIdx.x + threadIdx.x;
   RFA_t rfa;
 
@@ -151,7 +153,7 @@ __global__ void kernel_manyc(FloatType *result, RFA_t *partial, const FloatType 
 }
 
 template<class FloatType, class RFA_t>
-void bitwise_deterministic_summation_manyc(FloatType *result_d, RFA_t *partial_d, const thrust::device_vector<FloatType> &vec_d, const FloatType max_abs_val){
+void bitwise_deterministic_summation_manyc(RFA_t *result_d, RFA_t *partial_d, const thrust::device_vector<FloatType> &vec_d, const FloatType max_abs_val){
   kernel_manyc<block_size, M, FloatType><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size(), max_abs_val);
   CHECK_CUDA(cudaDeviceSynchronize());
 }
@@ -173,16 +175,17 @@ FloatType PerformTestsOnData(
   // create bins on host and copy to device
   RFA_bins<FloatType> bins;
   bins.initialize_bins();
+  memcpy(bin_host_buffer, &bins, sizeof(bins));
   CHECK_CUDA(cudaMemcpyToSymbol(bin_device_buffer, &bins, sizeof(bins), 0, cudaMemcpyHostToDevice));
 
   // result buffer setup
-  FloatType *result_h;
-  FloatType *result_d;
-  CHECK_CUDA(cudaMallocHost(&result_h, sizeof(FloatType)));
+  using RFA_t = ReproducibleFloatingAccumulator<FloatType>;
+  RFA_t *result_h;
+  RFA_t *result_d;
+  CHECK_CUDA(cudaMallocHost(&result_h, sizeof(RFA_t)));
   CHECK_CUDA(cudaHostGetDevicePointer(&result_d, result_h, 0));
 
   // partials
-  using RFA_t = ReproducibleFloatingAccumulator<FloatType>;
   RFA_t *partials_d;
   CHECK_CUDA(cudaMalloc(&partials_d, grid_size * sizeof(RFA_t)));
 
@@ -202,7 +205,7 @@ FloatType PerformTestsOnData(
   std::unordered_map<FloatType, uint32_t> kahan_sums;
 
   bitwise_deterministic_summation_1<FloatType>(result_d, partials_d, floats);
-  const auto ref_val = *result_h;
+  const auto ref_val = result_h->conv();
   const auto kahan_ldsum = serial_kahan_summation<long double>(floats);
   for(int test=0;test<TESTS;test++){
     std::shuffle(floats.begin(), floats.end(), gen);
@@ -210,7 +213,7 @@ FloatType PerformTestsOnData(
 
     time_deterministic_1.start();
     bitwise_deterministic_summation_1<FloatType>(result_d, partials_d, floats_d);
-    const auto my_val_1 = *result_h;
+    const auto my_val_1 = result_h->conv();
     time_deterministic_1.stop();
     if(ref_val!=my_val_1){
       std::cout<<"ERROR: UNEQUAL VALUES ON TEST #"<<test<<" for add-1!"<<std::endl;
@@ -223,7 +226,7 @@ FloatType PerformTestsOnData(
 
     time_deterministic_many.start();
     bitwise_deterministic_summation_many<FloatType>(result_d, partials_d, floats_d);
-    const auto my_val_many = *result_h;
+    const auto my_val_many = result_h->conv();
     time_deterministic_many.stop();
     if(ref_val!=my_val_many){
       std::cout<<"ERROR: UNEQUAL VALUES ON TEST #"<<test<<" for add-many!"<<std::endl;
@@ -236,7 +239,7 @@ FloatType PerformTestsOnData(
 
     time_deterministic_manyc.start();
     bitwise_deterministic_summation_manyc<FloatType>(result_d, partials_d, floats_d, 1000);
-    const auto my_val_manyc = *result_h;
+    const auto my_val_manyc = result_h->conv();
     time_deterministic_manyc.stop();
     if(ref_val!=my_val_manyc){
       std::cout<<"ERROR: UNEQUAL VALUES ON TEST #"<<test<<" for add-manyc!"<<std::endl;
