@@ -41,11 +41,14 @@ using cuda::std::min;
 using cuda::std::max;
 #endif
 
+// disable zero checks
+#define DISABLE_ZERO
+
 // disable nan / infinity checks
 #define DISABLE_NANINF
 
 // jump table for indexing into data
-//#define JUMP
+#define JUMP
 
 template <class ftype> struct RFA_bins
 {
@@ -143,33 +146,22 @@ private:
   ///Get the bit representation of a const double
   __host__ __device__ static inline uint64_t  get_bits(const double &x){ return *reinterpret_cast<const uint64_t*>(&x);}
 
-  ///Return primary vector value ref
-  template <int n = 0>  __host__ __device__ ftype& primary(int i) {
-#ifndef JUMP
-    return data[i];
-#else
-    if (i == n) return data[n];
-    else if constexpr (n < FOLD -1) return primary<n + 1>(i);
-#endif
-  }
-
-  ///Return carry vector value ref
-  template <int n = 0> __host__ __device__ ftype& carry(int i) {
-#ifndef JUMP
-    return data[i + FOLD];
-#else
-    if (i == n) return data[n + FOLD];
-    else if constexpr (n < FOLD - 1) return carry<n + 1>(i);
-#endif
-  }
-
   ///Return primary vector value const ref
   template <int n = 0> __host__ __device__ const ftype& primary(int i) const {
 #ifndef JUMP
     return data[i];
 #else
-    if (i == n) return data[n];
-    else if constexpr (n < FOLD -1) return primary<n + 1>(i);
+    if constexpr (FOLD == 3) {
+      switch (i) {
+      case 0: return data[0];
+      case 1: return data[1];
+      case 2:
+      default: return data[2];
+      }
+    } else {
+      if (i == n) return data[n];
+      else if constexpr (n < FOLD -1) return primary<n + 1>(i);
+    }
 #endif
   }
 
@@ -178,10 +170,37 @@ private:
 #ifndef JUMP
     return data[i + FOLD];
 #else
-    if (i == n) return data[n + FOLD];
-    else if constexpr (n < FOLD - 1) return carry<n + 1>(i);
+    if constexpr (FOLD == 3) {
+      switch (i) {
+      case 0: return data[0 + FOLD];
+      case 1: return data[1 + FOLD];
+      case 2:
+      default: return data[2 + FOLD];
+      }
+    } else {
+      if (i == n) return data[n + FOLD];
+      else if constexpr (n < FOLD - 1) return carry<n + 1>(i);
+    }
 #endif
   }
+
+  ///Return primary vector value ref
+  template <int n = 0>  __host__ __device__ ftype& primary(int i) {
+    const auto &c = *this;
+    return const_cast<ftype &>(c.template primary<n>(i));
+  }
+
+  ///Return carry vector value ref
+  template <int n = 0> __host__ __device__ ftype& carry(int i) {
+    const auto &c = *this;
+    return const_cast<ftype &>(c.template carry<n>(i));
+  }
+
+#ifdef DISABLE_ZERO
+  __host__ __device__ static inline constexpr bool ISZERO(const ftype) { return false; }
+#else
+  __host__ __device__ static inline constexpr bool ISZERO(const ftype x) { return x == 0.0 ; }
+#endif
 
 #ifdef DISABLE_NANINF
   __host__ __device__ static inline constexpr int ISNANINF(const ftype) { return false; }
@@ -245,7 +264,7 @@ private:
     }
 
     X_index = binned_dindex(max_abs_val);
-    if(primary(0) == 0.0){
+    if( ISZERO(primary(0)) ){
       const ftype *const bins = binned_bins(X_index);
       for(i = 0; i < FOLD; i++){
         primary(i * incpriY) = bins[i];
@@ -332,12 +351,10 @@ private:
   ///
   ///@param incpriX stride within X's primary vector (use every incpriX'th element)
   ///@param inccarX stride within X's carry vector (use every inccarX'th element)
-  __host__ __device__ void binned_dmrenorm(const int incpriX, const int inccarX) {
-    if(primary(0) == 0.0 || ISNANINF(primary(0))){
-      return;
-    }
+  __host__ __device__ inline void binned_dmrenorm(const int incpriX, const int inccarX) {
+    if (ISZERO(primary(0)) || ISNANINF(primary(0))) return;
 
-    for (int i = 0; i < FOLD; i++) {//, priX += incpriX, carX += inccarX) {
+    for (int i = 0; i < FOLD; i++) {
       auto tmp_renormd = primary(i * incpriX);
       auto& tmp_renorml = get_bits(tmp_renormd);
 
@@ -368,13 +385,8 @@ private:
   __host__ __device__ double binned_conv_double(const int incpriX, const int inccarX) const {
     int i = 0;
 
-    if (ISNANINF(primary(0))){
-      return primary(0);
-    }
-
-    if (primary(0) == 0.0) {
-      return 0.0;
-    }
+    if (ISNANINF(primary(0))) return primary(0);
+    if (ISZERO(primary(0))) return 0.0;
 
     double Y = 0.0;
     double scale_down;
@@ -431,13 +443,8 @@ private:
     int i = 0;
     double Y = 0.0;
 
-    if (ISNANINF(primary(0))){
-      return primary(0);
-    }
-
-    if (primary(0) == 0.0) {
-      return 0.0;
-    }
+    if (ISNANINF(primary(0))) return primary(0);
+    if (ISZERO(primary(0))) return 0.0;
 
     //Note that the following order of summation is in order of decreasing
     //exponent. The following code is specific to SBWIDTH=13, FLT_MANT_DIG=24, and
@@ -471,10 +478,9 @@ private:
   ///@param incpriY stride within Y's primary vector (use every incpriY'th element)
   ///@param inccarY stride within Y's carry vector (use every inccarY'th element)
   __host__ __device__ void binned_dmdmadd(const ReproducibleFloatingAccumulator &x, const int incpriX, const int inccarX, const int incpriY, const int inccarY) {
-    if (x.primary(0) == 0.0)
-      return;
+    if (ISZERO(x.primary(0))) return;
 
-    if (primary(0) == 0.0) {
+    if (ISZERO(primary(0))) {
       for (int i = 0; i < FOLD; i++) {
         primary(i*incpriY) = x.primary(i*incpriX);
         carry(i*inccarY) = x.carry(i*inccarX);
@@ -675,9 +681,7 @@ private:
   ///@param max_abs_val Maximum absolute value of any member of the range
   template <typename T, typename std::enable_if<std::is_arithmetic<T>::value>::type* = nullptr>
   __host__ __device__ void add(const T *input, const size_t N, const ftype max_abs_val) {
-    if(N==0){
-      return;
-    }
+    if (N==0) return;
     add(input, input + N, max_abs_val);
   }
 
@@ -690,9 +694,8 @@ private:
   ///@param N           Number of elements to add
   template <typename T, typename std::enable_if<std::is_arithmetic<T>::value>::type* = nullptr>
   __host__ __device__ void add(const T *input, const size_t N) {
-    if(N==0){
-      return;
-    }
+    if (N==0) return;
+
     T max_abs_val = input[0];
     for(size_t i=0;i<N;i++){
       max_abs_val = max(max_abs_val, std::abs(input[i]));
