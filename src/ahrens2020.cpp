@@ -1,6 +1,7 @@
 #include "common.hpp"
 #include "reproducible_floating_accumulator.hpp"
 
+#include <cstring>
 #include <iostream>
 #include <random>
 #include <unordered_map>
