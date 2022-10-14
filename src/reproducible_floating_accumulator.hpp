@@ -30,6 +30,7 @@
 #ifndef __CUDACC__
 #define __host__
 #define __device__
+#define __forceinline__
 #include <array>
 using std::array;
 using std::min;
@@ -48,7 +49,7 @@ using cuda::std::max;
 #define DISABLE_NANINF
 
 // jump table for indexing into data
-#define JUMP
+#define JUMP true
 
 template <class ftype> struct RFA_bins
 {
@@ -105,7 +106,7 @@ private:
   array<ftype, 2*FOLD> data = {0};
 
   ///Floating-point precision bin width
-  static constexpr auto BIN_WIDTH = std::is_same<ftype, double>::value ? 40 : 13;
+  static constexpr auto BIN_WIDTH = std::is_same_v<ftype, double> ? 40 : 13;
   static constexpr auto MIN_EXP = std::numeric_limits<ftype>::min_exponent;
   static constexpr auto MAX_EXP = std::numeric_limits<ftype>::max_exponent;
   static constexpr auto MANT_DIG = std::numeric_limits<ftype>::digits;
@@ -147,11 +148,8 @@ private:
   __host__ __device__ static inline uint64_t  get_bits(const double &x){ return *reinterpret_cast<const uint64_t*>(&x);}
 
   ///Return primary vector value const ref
-  template <int n = 0> __host__ __device__ const ftype& primary(int i) const {
-#ifndef JUMP
-    return data[i];
-#else
-    if constexpr (FOLD == 3) {
+  template <int n = 0> __host__ __device__ __forceinline__ const ftype& primary(int i) const {
+    if constexpr (JUMP && FOLD == 3) {
       switch (i) {
       case 0: return data[0];
       case 1: return data[1];
@@ -159,18 +157,15 @@ private:
       default: return data[2];
       }
     } else {
-      if (i == n) return data[n];
-      else if constexpr (n < FOLD -1) return primary<n + 1>(i);
+      return data[i];
+      //if (i == n) return data[n];
+      //else if constexpr (n < FOLD -1) return primary<n + 1>(i);
     }
-#endif
   }
 
   ///Return carry vector value const ref
-  template <int n = 0>  __host__ __device__ const ftype& carry(int i) const {
-#ifndef JUMP
-    return data[i + FOLD];
-#else
-    if constexpr (FOLD == 3) {
+  template <int n = 0>  __host__ __device__ __forceinline__ const ftype& carry(int i) const {
+    if constexpr (JUMP && FOLD == 3) {
       switch (i) {
       case 0: return data[0 + FOLD];
       case 1: return data[1 + FOLD];
@@ -178,20 +173,20 @@ private:
       default: return data[2 + FOLD];
       }
     } else {
-      if (i == n) return data[n + FOLD];
-      else if constexpr (n < FOLD - 1) return carry<n + 1>(i);
+      return data[i + FOLD];
+      //if (i == n) return data[n + FOLD];
+      //else if constexpr (n < FOLD - 1) return carry<n + 1>(i);
     }
-#endif
   }
 
   ///Return primary vector value ref
-  template <int n = 0>  __host__ __device__ ftype& primary(int i) {
+  template <int n = 0>  __host__ __device__ __forceinline__ ftype& primary(int i) {
     const auto &c = *this;
     return const_cast<ftype &>(c.template primary<n>(i));
   }
 
   ///Return carry vector value ref
-  template <int n = 0> __host__ __device__ ftype& carry(int i) {
+  template <int n = 0> __host__ __device__ __forceinline__ ftype& carry(int i) {
     const auto &c = *this;
     return const_cast<ftype &>(c.template carry<n>(i));
   }
@@ -254,31 +249,25 @@ private:
   ///@param incpriY stride within Y's primary vector (use every incpriY'th element)
   ///@param inccarY stride within Y's carry vector (use every inccarY'th element)
   __host__ __device__ void binned_dmdupdate(const ftype max_abs_val, const int incpriY, const int inccarY) {
-    int i;
-    int j;
-    int X_index;
-    int shift;
+    if (ISNANINF(primary(0))) return;
 
-    if (ISNANINF(primary(0))){
-      return;
-    }
-
-    X_index = binned_dindex(max_abs_val);
+    int X_index = binned_dindex(max_abs_val);
     if( ISZERO(primary(0)) ){
       const ftype *const bins = binned_bins(X_index);
-      for(i = 0; i < FOLD; i++){
+      for(int i = 0; i < FOLD; i++){
         primary(i * incpriY) = bins[i];
         carry(i * inccarY) = 0.0;
       }
     }else{
-      shift = binned_index() - X_index;
+      int shift = binned_index() - X_index;
       if(shift > 0){
+        int i;
         for(i = FOLD - 1; i >= shift; i--){ // spill here ?
           primary(i * incpriY) = primary((i - shift) * incpriY);
           carry(i * inccarY) = carry((i - shift) * inccarY);
         }
         const ftype *const bins = binned_bins(X_index);
-        for(j = 0; j < i + 1; j++){
+        for(int j = 0; j < i + 1; j++){
           primary(j * incpriY) = bins[j];
           carry(j * inccarY) = 0.0;
         }
@@ -538,9 +527,10 @@ private:
   }
 
   ///Return the fold of the binned fp
-  int fold() const {
-    return FOLD;
-  }
+  constexpr int fold() const { return FOLD; }
+
+  ///Return the endurance of the binned fp
+  constexpr int endurance() const { return ENDURANCE; }
 
   ///Returns the number of reference bins. Used for judging memory usage.
   constexpr size_t number_of_reference_bins() {
@@ -650,9 +640,11 @@ private:
   __host__ __device__ void add(InputIt first, InputIt last, const ftype max_abs_val) {
     binned_dmdupdate(std::abs(max_abs_val), 1, 1);
     size_t count = 0;
+    size_t N = last - first;
     for(;first!=last;first++,count++){
       binned_dmddeposit(static_cast<ftype>(*first), 1);
-      if(count==ENDURANCE){
+      // first conditional allows compiler to remove the call here when possible
+      if (N > ENDURANCE && count==ENDURANCE) {
         binned_dmrenorm(1, 1);
         count = 0;
       }
