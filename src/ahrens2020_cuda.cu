@@ -1,93 +1,17 @@
-#include "common.hpp"
 #include "reproducible_floating_accumulator.hpp"
+#include "common.hpp"
+#include "common_cuda.hpp"
+#include "nvtx3/nvtx3.hpp"
 
 #include <iostream>
 #include <random>
 #include <unordered_map>
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
-#include <cub/cub.cuh>
+#include <thrust/shuffle.h>
+#include <thrust/random.h>
 
-#define CHECK_CUDA(ans) { gpuAssert((ans), __FILE__, __LINE__); }
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
-{
-   if (code != cudaSuccess)
-   {
-      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
-      if (abort) exit(code);
-   }
-}
-
-constexpr int grid_size = 160;    // blocks per grid
-constexpr int block_size = 256; // threads per block
 constexpr int M = 4;            // elements per thread array
-
-template <class Accumulator>
-__host__ __device__
-std::enable_if_t<std::is_same_v<Accumulator, ReproducibleFloatingAccumulator<typename Accumulator::ftype, Accumulator::FOLD>>, Accumulator>
-operator+(const Accumulator &lhs, const Accumulator &rhs)
-{
-  Accumulator rtn = lhs;
-  rtn += rhs;
-  return rtn;
-}
-
-__device__ unsigned int count = 0;
-
-// we can make this much better by first computing the block wide max
-// and then summing
-template <int block_size, class T>
-__device__ auto block_sum(T value)
-{
-  // Specialize BlockReduce for a 1D block of 128 threads of type int
-  using BlockReduce = cub::BlockReduce<T, block_size>;
-  // Allocate shared memory for BlockReduce
-  __shared__ typename BlockReduce::TempStorage temp_storage;
-  // Compute the block-wide sum for thread0
-  return BlockReduce(temp_storage).Sum(value);
-}
-
-template <int block_size, class RFA_t, class index_t>
-__device__ void reduce(RFA_t *result, RFA_t *partial, RFA_t &rfa, index_t tid)
-{
-  if constexpr (grid_size == 1) {
-
-    auto aggregate = block_sum<block_size>(rfa);
-    if (tid == 0) *result = aggregate;
-
-  } else {
-
-    __shared__ bool is_last_block_done;
-    auto aggregate = block_sum<block_size>(rfa);
-
-    if (threadIdx.x == 0) {
-      partial[blockIdx.x] = aggregate;
-      __threadfence(); // flush result
-
-      // increment global block counter
-      auto value = atomicInc(&count, gridDim.x);
-      is_last_block_done = (value == gridDim.x - 1);
-    }
-
-    __syncthreads();
-
-    // finish reduction if last block
-    if (is_last_block_done) {
-      auto i = threadIdx.x;
-      RFA_t rfa;
-      while (i < gridDim.x) {
-        rfa += static_cast<RFA_t *>(partial)[i];
-        i += blockDim.x;
-      }
-
-      auto aggregate = block_sum<block_size>(rfa);
-      if (threadIdx.x == 0) *result = aggregate;
-
-      count = 0; // reset counter
-    }
-
-  }
-}
 
 ///Tests summing many numbers one at a time without a known absolute value caps
 template <class FloatType, int block_size, class RFA_t>
@@ -98,12 +22,13 @@ __global__ void kernel_1(RFA_t *result, RFA_t *partial, const FloatType * const 
   // first do thread private reduction
   for (auto i = tid; i < N; i+= blockDim.x * gridDim.x) rfa += x[i];
 
-  // Compute the block-wide sum for thread0
+  // Compute the block-wide sum for thread 0
   reduce<block_size>(result, partial, rfa, tid);
 }
 
 template<class FloatType, class RFA_t>
 void bitwise_deterministic_summation_1(RFA_t *result_d, RFA_t *partial_d, const thrust::device_vector<FloatType> &vec_d){
+  nvtx3::scoped_range r{__func__};
   kernel_1<FloatType, block_size><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size());
   CHECK_CUDA(cudaDeviceSynchronize());
 }
@@ -123,12 +48,13 @@ __global__ void kernel_many(RFA_t *result, RFA_t *partial, const FloatType * con
     rfa.add(y, M);
   }
 
-  // Compute the block-wide sum for thread0
+  // Compute the block-wide sum for thread 0
   reduce<block_size>(result, partial, rfa, tid);
 }
 
 template<class FloatType, class RFA_t>
 void bitwise_deterministic_summation_many(RFA_t *result_d, RFA_t *partial_d, const thrust::device_vector<FloatType> &vec_d){
+  nvtx3::scoped_range r{__func__};
   kernel_many<block_size, M, FloatType><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size());
   CHECK_CUDA(cudaDeviceSynchronize());
 }
@@ -148,24 +74,65 @@ __global__ void kernel_manyc(RFA_t *result, RFA_t *partial, const FloatType * co
     rfa.add(y, M, max_abs_val);
   }
 
-  // Compute the block-wide sum for thread0
+  // Compute the block-wide sum for thread 0
   reduce<block_size>(result, partial, rfa, tid);
 }
 
 template<class FloatType, class RFA_t>
 void bitwise_deterministic_summation_manyc(RFA_t *result_d, RFA_t *partial_d, const thrust::device_vector<FloatType> &vec_d, const FloatType max_abs_val){
+  nvtx3::scoped_range r{__func__};
   kernel_manyc<block_size, M, FloatType><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size(), max_abs_val);
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
+// Kahan summation kernel
+template <int block_size, class kahan_t, class FloatType>
+__global__ void kernel_kahan(kahan_t *result, kahan_t *partial, const FloatType * const x, size_t N) {
+  auto tid = blockDim.x * blockIdx.x + threadIdx.x;
+  kahan_t sum = {};
+
+  // first do thread private reduction
+  for (auto i = tid; i < N; i+= blockDim.x * gridDim.x) sum += x[i];
+
+  // Compute the block-wide sum for thread 0
+  reduce<block_size>(result, partial, sum, tid);
+}
+
+template<class kahan_t, class FloatType>
+void kahan_summation(kahan_t *result_d, kahan_t *partial_d, const thrust::device_vector<FloatType> &vec_d){
+  nvtx3::scoped_range r{__func__};
+  kernel_kahan<block_size, kahan_t, FloatType><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size());
+  CHECK_CUDA(cudaDeviceSynchronize());
+}
+
+// naive summation kernel
+template <int block_size, class AccumType, class FloatType>
+__global__ void kernel_simple(AccumType *result, AccumType *partial, const FloatType * const x, size_t N) {
+  auto tid = blockDim.x * blockIdx.x + threadIdx.x;
+  AccumType sum = {};
+
+  // first do thread private reduction
+  for (auto i = tid; i < N; i+= blockDim.x * gridDim.x) sum += x[i];
+
+  // Compute the block-wide sum for thread 0
+  reduce<block_size>(result, partial, sum, tid);
+}
+
+template<class AccumType, class FloatType>
+void simple_summation(AccumType *result_d, AccumType *partial_d, const thrust::device_vector<FloatType> &vec_d){
+  nvtx3::scoped_range r{__func__};
+  kernel_simple<block_size, AccumType, FloatType><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size());
+  CHECK_CUDA(cudaDeviceSynchronize());
+}
 
 // Timing tests for the summation algorithms
 template<class FloatType, class SimpleAccumType>
 FloatType PerformTestsOnData(
   const int TESTS,
-  thrust::host_vector<FloatType> floats, //Make a copy so we use the same data for each test
-  std::mt19937 gen               //Make a copy so we use the same data for each test
+  thrust::host_vector<FloatType> floats //Make a copy so we use the same data for each test
 ){
+  nvtx3::scoped_range r{__func__};
+
   Timer time_deterministic_1;
   Timer time_deterministic_many;
   Timer time_deterministic_manyc;
@@ -178,16 +145,36 @@ FloatType PerformTestsOnData(
   memcpy(bin_host_buffer, &bins, sizeof(bins));
   CHECK_CUDA(cudaMemcpyToSymbol(bin_device_buffer, &bins, sizeof(bins), 0, cudaMemcpyHostToDevice));
 
-  // result buffer setup
+  // rfa result buffer setup
   using RFA_t = ReproducibleFloatingAccumulator<FloatType>;
-  RFA_t *result_h;
-  RFA_t *result_d;
-  CHECK_CUDA(cudaMallocHost(&result_h, sizeof(RFA_t)));
+  RFA_t *rfa_result_h;
+  RFA_t *rfa_result_d;
+  CHECK_CUDA(cudaMallocHost(&rfa_result_h, sizeof(RFA_t)));
+  CHECK_CUDA(cudaHostGetDevicePointer(&rfa_result_d, rfa_result_h, 0));
+
+  // rfa partials
+  RFA_t *rfa_partial_d;
+  CHECK_CUDA(cudaMalloc(&rfa_partial_d, grid_size * sizeof(RFA_t)));
+
+  // simple result buffer setup
+  SimpleAccumType *result_h;
+  SimpleAccumType *result_d;
+  CHECK_CUDA(cudaMallocHost(&result_h, sizeof(SimpleAccumType)));
   CHECK_CUDA(cudaHostGetDevicePointer(&result_d, result_h, 0));
 
-  // partials
-  RFA_t *partials_d;
-  CHECK_CUDA(cudaMalloc(&partials_d, grid_size * sizeof(RFA_t)));
+  // simple partials
+  SimpleAccumType *partial_d;
+  CHECK_CUDA(cudaMalloc(&partial_d, grid_size * sizeof(SimpleAccumType)));
+
+  // kahan result buffer setup
+  kahan<SimpleAccumType> *kahan_result_h;
+  kahan<SimpleAccumType> *kahan_result_d;
+  CHECK_CUDA(cudaMallocHost(&kahan_result_h, sizeof(kahan<SimpleAccumType>)));
+  CHECK_CUDA(cudaHostGetDevicePointer(&kahan_result_d, kahan_result_h, 0));
+
+  // simple partials
+  kahan<SimpleAccumType> *kahan_partial_d;
+  CHECK_CUDA(cudaMalloc(&kahan_partial_d, grid_size * sizeof(kahan<SimpleAccumType>)));
 
   //Very precise output
   std::cout.precision(std::numeric_limits<FloatType>::max_digits10);
@@ -204,16 +191,21 @@ FloatType PerformTestsOnData(
   std::unordered_map<FloatType, uint32_t> simple_sums;
   std::unordered_map<FloatType, uint32_t> kahan_sums;
 
-  bitwise_deterministic_summation_1<FloatType>(result_d, partials_d, floats);
-  const auto ref_val = result_h->conv();
+  bitwise_deterministic_summation_1<FloatType>(rfa_result_d, rfa_partial_d, floats);
+  const auto ref_val = rfa_result_h->conv();
   const auto kahan_ldsum = serial_kahan_summation<long double>(floats);
+  long double ref_diff = std::abs(ref_val - kahan_ldsum);
+  long double simple_max_diff = 0.0;
+  long double kahan_max_diff = 0.0;
+
+  thrust::device_vector<FloatType> floats_d = floats;
+  thrust::default_random_engine g;
   for(int test=0;test<TESTS;test++){
-    std::shuffle(floats.begin(), floats.end(), gen);
-    thrust::device_vector<FloatType> floats_d = floats;
+    thrust::shuffle(floats_d.begin(), floats_d.end(), g);
 
     time_deterministic_1.start();
-    bitwise_deterministic_summation_1<FloatType>(result_d, partials_d, floats_d);
-    const auto my_val_1 = result_h->conv();
+    bitwise_deterministic_summation_1<FloatType>(rfa_result_d, rfa_partial_d, floats_d);
+    const auto my_val_1 = rfa_result_h->conv();
     time_deterministic_1.stop();
     if(ref_val!=my_val_1){
       std::cout<<"ERROR: UNEQUAL VALUES ON TEST #"<<test<<" for add-1!"<<std::endl;
@@ -225,8 +217,8 @@ FloatType PerformTestsOnData(
     }
 
     time_deterministic_many.start();
-    bitwise_deterministic_summation_many<FloatType>(result_d, partials_d, floats_d);
-    const auto my_val_many = result_h->conv();
+    bitwise_deterministic_summation_many<FloatType>(rfa_result_d, rfa_partial_d, floats_d);
+    const auto my_val_many = rfa_result_h->conv();
     time_deterministic_many.stop();
     if(ref_val!=my_val_many){
       std::cout<<"ERROR: UNEQUAL VALUES ON TEST #"<<test<<" for add-many!"<<std::endl;
@@ -238,8 +230,8 @@ FloatType PerformTestsOnData(
     }
 
     time_deterministic_manyc.start();
-    bitwise_deterministic_summation_manyc<FloatType>(result_d, partials_d, floats_d, 1000);
-    const auto my_val_manyc = result_h->conv();
+    bitwise_deterministic_summation_manyc<FloatType>(rfa_result_d, rfa_partial_d, floats_d, 1000);
+    const auto my_val_manyc = rfa_result_h->conv();
     time_deterministic_manyc.stop();
     if(ref_val!=my_val_manyc){
       std::cout<<"ERROR: UNEQUAL VALUES ON TEST #"<<test<<" for add-manyc!"<<std::endl;
@@ -251,12 +243,16 @@ FloatType PerformTestsOnData(
     }
 
     time_kahan.start();
-    const auto kahan_sum = serial_kahan_summation<FloatType>(floats);
+    kahan_summation<kahan<SimpleAccumType>, FloatType>(kahan_result_d, kahan_partial_d, floats_d);
+    const auto kahan_sum = kahan_result_h->sum + kahan_result_h->c;
+    if (std::abs(kahan_sum - kahan_ldsum) > kahan_max_diff) kahan_max_diff = std::abs(kahan_sum - kahan_ldsum);
     kahan_sums[kahan_sum]++;
     time_kahan.stop();
 
     time_simple.start();
-    const auto simple_sum = serial_simple_summation<SimpleAccumType>(floats);
+    simple_summation<SimpleAccumType, FloatType>(result_d, partial_d, floats_d);
+    const auto simple_sum = *result_h;
+    if (std::abs(simple_sum - kahan_ldsum) > simple_max_diff) simple_max_diff = std::abs(simple_sum - kahan_ldsum);
     simple_sums[simple_sum]++;
     time_simple.stop();
   }
@@ -266,8 +262,8 @@ FloatType PerformTestsOnData(
   std::cout<<"Average deterministic sum 1ata bandwidth  = "<<1e-9*bytes/(time_deterministic_1.total/TESTS)<<" GB/s"<<std::endl;
   std::cout<<"Average deterministic sum many bandwidth  = "<<1e-9*bytes/(time_deterministic_many.total/TESTS)<<" GB/s"<<std::endl;
   std::cout<<"Average deterministic sum manyc bandwidth = "<<1e-9*bytes/(time_deterministic_manyc.total/TESTS)<<" GB/s"<<std::endl;
-  std::cout<<"Average simple summation bandwidth        = "<<(time_simple.total/TESTS)<<" GB/s"<<std::endl;
-  std::cout<<"Average Kahan summation bandwidth         = "<<(time_kahan.total/TESTS)<<" GB/s"<<std::endl;
+  std::cout<<"Average simple summation bandwidth        = "<<1e-9*bytes/(time_simple.total/TESTS)<<" GB/s"<<std::endl;
+  std::cout<<"Average Kahan summation bandwidth         = "<<1e-9*bytes/(time_kahan.total/TESTS)<<" GB/s"<<std::endl;
   std::cout<<"Average deterministic sum 1ata time       = "<<(time_deterministic_1.total/TESTS)<<std::endl;
   std::cout<<"Average deterministic sum many time       = "<<(time_deterministic_many.total/TESTS)<<std::endl;
   std::cout<<"Average deterministic sum manyc time      = "<<(time_deterministic_manyc.total/TESTS)<<std::endl;
@@ -288,6 +284,9 @@ FloatType PerformTestsOnData(
   std::cout<<"Kahan long double accumulator value  = "<<kahan_ldsum<<std::endl;
   std::cout<<"Distinct Kahan values                = "<<kahan_sums.size()<<std::endl;
   std::cout<<"Distinct Simple values               = "<<simple_sums.size()<<std::endl;
+  std::cout<<"Deterministic deviation              = "<<ref_diff<<std::endl;
+  std::cout<<"Kahan max abs deviation              = "<<kahan_max_diff<<std::endl;
+  std::cout<<"Simple max abs deviation             = "<<simple_max_diff<<std::endl;
 
 #if 0
   for(const auto &kv: kahan_sums){
@@ -298,11 +297,16 @@ FloatType PerformTestsOnData(
     std::cout<<"Simple sum values (N="<<std::fixed<<kv.second<<") "<<kv.first<<" ("<<binrep<FloatType>(kv.first)<<")"<<std::endl;
   }
 #endif
-
   std::cout<<std::endl;
 
-  CHECK_CUDA(cudaFree(partials_d));
+  CHECK_CUDA(cudaFree(kahan_partial_d));
+  CHECK_CUDA(cudaFreeHost(kahan_result_h));
+
+  CHECK_CUDA(cudaFree(partial_d));
   CHECK_CUDA(cudaFreeHost(result_h));
+
+  CHECK_CUDA(cudaFree(rfa_partial_d));
+  CHECK_CUDA(cudaFreeHost(rfa_result_h));
 
   return ref_val;
 }
@@ -310,41 +314,65 @@ FloatType PerformTestsOnData(
 // Use this to make sure the tests are reproducible
 template<class FloatType, class SimpleAccumType>
 void PerformTestsOnUniformRandom(const int N, const int TESTS){
-  std::mt19937 gen(123456789);
-  std::uniform_real_distribution<double> distr(-1000, 1000);
-  thrust::host_vector<double> floats;
-  for(int i=0;i<N;i++){
-    floats.push_back(distr(gen));
+  thrust::host_vector<FloatType> input;
+  {
+    nvtx3::scoped_range r{"setup"};
+    std::mt19937 gen(123456789);
+    std::uniform_real_distribution<double> distr(-1000, 1000);
+    thrust::host_vector<double> floats;
+    for (int i=0;i<N;i++) floats.push_back(distr(gen));
+    input = {floats.begin(), floats.end()};
+    std::cout<<"Input Data                           = Uniform Random"<<std::endl;
   }
-  thrust::host_vector<FloatType> input(floats.begin(), floats.end());
-
-  std::cout<<"Input Data                           = Uniform Random"<<std::endl;
-  PerformTestsOnData<FloatType, SimpleAccumType>(TESTS, input, gen);
+  PerformTestsOnData<FloatType, SimpleAccumType>(TESTS, input);
 }
 
 // Use this to make sure the tests are reproducible
 template<class FloatType, class SimpleAccumType>
 void PerformTestsOnSineWaveData(const int N, const int TESTS){
-  std::mt19937 gen(123456789);
   thrust::host_vector<FloatType> input;
-  input.reserve(N);
-  // Make a sine wave
-  for(int i = 0; i < N; i++){
-    input.push_back(std::sin(2 * M_PI * (i / static_cast<double>(N) - 0.5)));
+  {
+    nvtx3::scoped_range r{"setup"};
+    input.reserve(N);
+    // Make a sine wave
+    for(int i = 0; i < N; i++){
+      input.push_back(std::sin(2 * M_PI * (i / static_cast<double>(N) - 0.5)));
+    }
+    std::cout<<"Input Data                           = Sine Wave"<<std::endl;
   }
-  std::cout<<"Input Data                           = Sine Wave"<<std::endl;
-  PerformTestsOnData<FloatType, SimpleAccumType>(TESTS, input, gen);
+  PerformTestsOnData<FloatType, SimpleAccumType>(TESTS, input);
 }
 
 int main(){
   const int N = 1'000'000;
   const int TESTS = 100;
 
-  PerformTestsOnUniformRandom<float, float>(N, TESTS);
-  PerformTestsOnUniformRandom<double, double>(N, TESTS);
+  std::cout << "Running CUDA parallel summation tests" << std::endl;
+  std::cout << "N = " << N << std::endl;
+  std::cout << "TESTS = " << TESTS << std::endl;
+  std::cout << "grid size = " << grid_size << std::endl;
+  std::cout << "block size = " << block_size << std::endl;
+  std::cout << std::endl;
 
-  PerformTestsOnSineWaveData<float, float>(N, TESTS);
-  PerformTestsOnSineWaveData<double, double>(N, TESTS);
+  {
+    nvtx3::scoped_range r{"uniform float"};
+    PerformTestsOnUniformRandom<float, float>(N, TESTS);
+  }
+
+  {
+    nvtx3::scoped_range r{"uniform double"};
+    PerformTestsOnUniformRandom<double, double>(N, TESTS);
+  }
+
+  {
+    nvtx3::scoped_range r{"sine double"};
+    PerformTestsOnSineWaveData<float, float>(N, TESTS);
+  }
+
+  {
+    nvtx3::scoped_range r{"sine float"};
+    PerformTestsOnSineWaveData<double, double>(N, TESTS);
+  }
 
   return 0;
 }
