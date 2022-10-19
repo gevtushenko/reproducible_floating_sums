@@ -85,6 +85,25 @@ struct kahan {
     sum = t;
   }
 
+#ifdef __CUDACC__
+  __host__ __device__ void operator+=(const double2 &x) {
+    operator+=(x.x);
+    operator+=(x.y);
+  }
+
+  __host__ __device__ void operator+=(const float2 &x) {
+    operator+=(x.x);
+    operator+=(x.y);
+  }
+
+  __host__ __device__ void operator+=(const float4 &x) {
+    operator+=(x.x);
+    operator+=(x.y);
+    operator+=(x.z);
+    operator+=(x.w);
+  }
+#endif
+
   // adding multiple Kahan accumulators lose precision?
   __host__ __device__ void operator+=(kahan<AccumType> x) {
 #if 0  // http://faculty.washington.edu/rjl/icerm2012/Lightning/Robey.pdf

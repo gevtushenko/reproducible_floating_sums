@@ -1,6 +1,7 @@
 #include "reproducible_floating_accumulator.hpp"
 #include "common.hpp"
 #include "common_cuda.hpp"
+#include "vector.hpp"
 #include "nvtx3/nvtx3.hpp"
 
 #include <iostream>
@@ -14,8 +15,8 @@
 constexpr int M = 4;            // elements per thread array
 
 ///Tests summing many numbers one at a time without a known absolute value caps
-template <class FloatType, int block_size, class RFA_t>
-__global__ void kernel_1(RFA_t *result, RFA_t *partial, const FloatType * const x, size_t N) {
+template <int block_size, class RFA_t, class T>
+__global__ void kernel_1(RFA_t *result, RFA_t *partial, const T * const x, size_t N) {
   auto tid = blockDim.x * blockIdx.x + threadIdx.x;
   RFA_t rfa;
 
@@ -29,21 +30,26 @@ __global__ void kernel_1(RFA_t *result, RFA_t *partial, const FloatType * const 
 template<class FloatType, class RFA_t>
 void bitwise_deterministic_summation_1(RFA_t *result_d, RFA_t *partial_d, const thrust::device_vector<FloatType> &vec_d){
   nvtx3::scoped_range r{__func__};
-  kernel_1<FloatType, block_size><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size());
+
+  auto *x = reinterpret_cast<const vector_t<FloatType>*>(thrust::raw_pointer_cast(vec_d.data()));
+  auto size = vec_d.size() / vector_size<FloatType>();
+
+  kernel_1<block_size><<<grid_size, block_size>>>(result_d, partial_d, x, size);
+
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
 ///Tests summing many numbers without a known absolute value caps
-template <int block_size, int M, class FloatType, class RFA_t>
-__global__ void kernel_many(RFA_t *result, RFA_t *partial, const FloatType * const x, size_t N) {
+template <int block_size, int M, class T, class RFA_t>
+__global__ void kernel_many(RFA_t *result, RFA_t *partial, const T * const x, size_t N) {
   auto tid = blockDim.x * blockIdx.x + threadIdx.x;
   RFA_t rfa;
 
   // first do thread private reduction
   for (auto i = tid; i < N; i+= M * blockDim.x * gridDim.x) {
-    FloatType y[M] = {};
+    T y[M] = {};
     for (auto j = 0; j < M; j++) {
-      y[j] = (i + j * blockDim.x * gridDim.x) < N ? x[i + j * blockDim.x * gridDim.x] : 0.0;
+      if (i + j * blockDim.x * gridDim.x < N) y[j] = x[i + j * blockDim.x * gridDim.x];
     }
     rfa.add(y, M);
   }
@@ -55,21 +61,25 @@ __global__ void kernel_many(RFA_t *result, RFA_t *partial, const FloatType * con
 template<class FloatType, class RFA_t>
 void bitwise_deterministic_summation_many(RFA_t *result_d, RFA_t *partial_d, const thrust::device_vector<FloatType> &vec_d){
   nvtx3::scoped_range r{__func__};
-  kernel_many<block_size, M, FloatType><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size());
+
+  auto *x = reinterpret_cast<const vector_t<FloatType>*>(thrust::raw_pointer_cast(vec_d.data()));
+  auto size = vec_d.size() / vector_size<FloatType>();
+
+  kernel_many<block_size, M><<<grid_size, block_size>>>(result_d, partial_d, x, size);
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
 ///Tests summing many numbers with a known absolute value caps
-template <int block_size, int M, class FloatType, class RFA_t>
-__global__ void kernel_manyc(RFA_t *result, RFA_t *partial, const FloatType * const x, size_t N, FloatType max_abs_val) {
+template <int block_size, int M, class T, class RFA_t, class FloatType>
+__global__ void kernel_manyc(RFA_t *result, RFA_t *partial, const T * const x, size_t N, FloatType max_abs_val) {
   auto tid = blockDim.x * blockIdx.x + threadIdx.x;
   RFA_t rfa;
 
   // first do thread private reduction
   for (auto i = tid; i < N; i+= M * blockDim.x * gridDim.x) {
-    FloatType y[M] = {};
+    T y[M] = {};
     for (auto j = 0; j < M; j++) {
-      y[j] = (i + j * blockDim.x * gridDim.x) < N ? x[i + j * blockDim.x * gridDim.x] : 0.0;
+      if (i + j * blockDim.x * gridDim.x < N) y[j] = x[i + j * blockDim.x * gridDim.x];
     }
     rfa.add(y, M, max_abs_val);
   }
@@ -81,7 +91,11 @@ __global__ void kernel_manyc(RFA_t *result, RFA_t *partial, const FloatType * co
 template<class FloatType, class RFA_t>
 void bitwise_deterministic_summation_manyc(RFA_t *result_d, RFA_t *partial_d, const thrust::device_vector<FloatType> &vec_d, const FloatType max_abs_val){
   nvtx3::scoped_range r{__func__};
-  kernel_manyc<block_size, M, FloatType><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size(), max_abs_val);
+
+  auto *x = reinterpret_cast<const vector_t<FloatType>*>(thrust::raw_pointer_cast(vec_d.data()));
+  auto size = vec_d.size() / vector_size<FloatType>();
+
+  kernel_manyc<block_size, M><<<grid_size, block_size>>>(result_d, partial_d, x, size, max_abs_val);
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
@@ -101,7 +115,11 @@ __global__ void kernel_kahan(kahan_t *result, kahan_t *partial, const FloatType 
 template<class kahan_t, class FloatType>
 void kahan_summation(kahan_t *result_d, kahan_t *partial_d, const thrust::device_vector<FloatType> &vec_d){
   nvtx3::scoped_range r{__func__};
-  kernel_kahan<block_size, kahan_t, FloatType><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size());
+
+  auto *x = reinterpret_cast<const vector_t<FloatType>*>(thrust::raw_pointer_cast(vec_d.data()));
+  auto size = vec_d.size() / vector_size<FloatType>();
+
+  kernel_kahan<block_size><<<grid_size, block_size>>>(result_d, partial_d, x, size);
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 
@@ -112,7 +130,7 @@ __global__ void kernel_simple(AccumType *result, AccumType *partial, const Float
   AccumType sum = {};
 
   // first do thread private reduction
-  for (auto i = tid; i < N; i+= blockDim.x * gridDim.x) sum += x[i];
+  for (auto i = tid; i < N; i+= blockDim.x * gridDim.x) sum += reduce(x[i]);
 
   // Compute the block-wide sum for thread 0
   reduce<block_size>(result, partial, sum, tid);
@@ -121,7 +139,11 @@ __global__ void kernel_simple(AccumType *result, AccumType *partial, const Float
 template<class AccumType, class FloatType>
 void simple_summation(AccumType *result_d, AccumType *partial_d, const thrust::device_vector<FloatType> &vec_d){
   nvtx3::scoped_range r{__func__};
-  kernel_simple<block_size, AccumType, FloatType><<<grid_size, block_size>>>(result_d, partial_d, thrust::raw_pointer_cast(vec_d.data()), vec_d.size());
+
+  auto *x = reinterpret_cast<const vector_t<FloatType>*>(thrust::raw_pointer_cast(vec_d.data()));
+  auto size = vec_d.size() / vector_size<FloatType>();
+
+  kernel_simple<block_size><<<grid_size, block_size>>>(result_d, partial_d, x, size);
   CHECK_CUDA(cudaDeviceSynchronize());
 }
 

@@ -40,6 +40,7 @@ using std::max;
 using cuda::std::array;
 using cuda::std::min;
 using cuda::std::max;
+#include "vector.hpp"
 #endif
 
 // disable zero checks
@@ -53,7 +54,7 @@ using cuda::std::max;
 
 template <class ftype> struct RFA_bins
 {
-  static constexpr auto BIN_WIDTH = std::is_same<ftype, double>::value ? 40 : 13;
+  static constexpr auto BIN_WIDTH = std::is_same_v<ftype, double> ? 40 : 13;
   static constexpr auto MIN_EXP = std::numeric_limits<ftype>::min_exponent;
   static constexpr auto MAX_EXP = std::numeric_limits<ftype>::max_exponent;
   static constexpr auto MANT_DIG = std::numeric_limits<ftype>::digits;
@@ -95,7 +96,7 @@ __constant__ static char bin_device_buffer[sizeof(RFA_bins<double>)];
 template<
   class ftype_,
   int FOLD_ = 3,
-  typename std::enable_if<std::is_floating_point<ftype_>::value>::type* = nullptr
+  typename std::enable_if_t<std::is_floating_point<ftype_>::value>* = nullptr
 >
 class ReproducibleFloatingAccumulator {
 public:
@@ -539,7 +540,7 @@ private:
 
   ///Accumulate an arithmetic @p x into the binned fp.
   ///NOTE: Casts @p x to the type of the binned fp
-  template <typename U, typename std::enable_if<std::is_arithmetic<U>::value>::type* = nullptr>
+  template <typename U, typename std::enable_if_t<std::is_arithmetic_v<U>>* = nullptr>
   __host__ __device__ ReproducibleFloatingAccumulator& operator+=(const U x){
     binned_dmdadd(static_cast<ftype>(x), 1, 1);
     return *this;
@@ -547,7 +548,7 @@ private:
 
   ///Accumulate-subtract an arithmetic @p x into the binned fp.
   ///NOTE: Casts @p x to the type of the binned fp
-  template <typename U, typename std::enable_if<std::is_arithmetic<U>::value>::type* = nullptr>
+  template <typename U, typename std::enable_if_t<std::is_arithmetic_v<U>>* = nullptr>
   __host__ __device__ ReproducibleFloatingAccumulator& operator-=(const U x){
     binned_dmdadd(-static_cast<ftype>(x), 1, 1);
     return *this;
@@ -578,7 +579,7 @@ private:
 
   ///Sets this binned fp equal to the arithmetic value @p x
   ///NOTE: Casts @p x to the type of the binned fp
-  template <typename U, typename std::enable_if<std::is_arithmetic<U>::value>::type* = nullptr>
+  template <typename U, typename std::enable_if_t<std::is_arithmetic_v<U>>* = nullptr>
   __host__ __device__ ReproducibleFloatingAccumulator& operator=(const U x){
     zero();
     binned_dmdadd(static_cast<ftype>(x), 1, 1);
@@ -671,7 +672,7 @@ private:
   ///@param input       Start of the range
   ///@param N           Number of elements to add
   ///@param max_abs_val Maximum absolute value of any member of the range
-  template <typename T, typename std::enable_if<std::is_arithmetic<T>::value>::type* = nullptr>
+  template <typename T, typename std::enable_if_t<std::is_arithmetic_v<T>>* = nullptr>
   __host__ __device__ void add(const T *input, const size_t N, const ftype max_abs_val) {
     if (N==0) return;
     add(input, input + N, max_abs_val);
@@ -684,7 +685,7 @@ private:
   ///
   ///@param input       Start of the range
   ///@param N           Number of elements to add
-  template <typename T, typename std::enable_if<std::is_arithmetic<T>::value>::type* = nullptr>
+  template <typename T, typename std::enable_if_t<std::is_arithmetic_v<T>>* = nullptr>
   __host__ __device__ void add(const T *input, const size_t N) {
     if (N==0) return;
 
@@ -695,6 +696,114 @@ private:
     add(input, N, max_abs_val);
   }
 
+#ifdef __CUDACC__
+  ///Accumulate a float4 @p x into the binned fp.
+  ///NOTE: Casts @p x to the type of the binned fp
+  __host__ __device__ ReproducibleFloatingAccumulator& operator+=(const float4 &x){
+    binned_dmdupdate(abs_max(x), 1, 1);
+    binned_dmddeposit(static_cast<ftype>(x.x), 1);
+    binned_dmddeposit(static_cast<ftype>(x.y), 1);
+    binned_dmddeposit(static_cast<ftype>(x.z), 1);
+    binned_dmddeposit(static_cast<ftype>(x.w), 1);
+    return *this;
+  }
+
+  ///Accumulate a double2 @p x into the binned fp.
+  ///NOTE: Casts @p x to the type of the binned fp
+  __host__ __device__ ReproducibleFloatingAccumulator& operator+=(const float2 &x){
+    binned_dmdupdate(abs_max(x), 1, 1);
+    binned_dmddeposit(static_cast<ftype>(x.x), 1);
+    binned_dmddeposit(static_cast<ftype>(x.y), 1);
+    return *this;
+  }
+
+  ///Accumulate a double2 @p x into the binned fp.
+  ///NOTE: Casts @p x to the type of the binned fp
+  __host__ __device__ ReproducibleFloatingAccumulator& operator+=(const double2 &x){
+    binned_dmdupdate(abs_max(x), 1, 1);
+    binned_dmddeposit(static_cast<ftype>(x.x), 1);
+    binned_dmddeposit(static_cast<ftype>(x.y), 1);
+    return *this;
+  }
+
+  __host__ __device__ void add(const float4 *input, const size_t N, float max_abs_val) {
+    if (N==0) return;
+    binned_dmdupdate(max_abs_val, 1, 1);
+
+    size_t count = 0;
+    for (size_t i = 0; i < N; i++) {
+      binned_dmddeposit(static_cast<ftype>(input[i].x), 1);
+      binned_dmddeposit(static_cast<ftype>(input[i].y), 1);
+      binned_dmddeposit(static_cast<ftype>(input[i].z), 1);
+      binned_dmddeposit(static_cast<ftype>(input[i].w), 1);
+
+      if (N > ENDURANCE && count==ENDURANCE) {
+        binned_dmrenorm(1, 1);
+        count = 0;
+      }
+    }
+  }
+
+  __host__ __device__ void add(const double2 *input, const size_t N, double max_abs_val) {
+    if (N==0) return;
+    binned_dmdupdate(max_abs_val, 1, 1);
+
+    size_t count = 0;
+    for (size_t i = 0; i < N; i++) {
+      binned_dmddeposit(static_cast<ftype>(input[i].x), 1);
+      binned_dmddeposit(static_cast<ftype>(input[i].y), 1);
+
+      if (N > ENDURANCE && count==ENDURANCE) {
+        binned_dmrenorm(1, 1);
+        count = 0;
+      }
+    }
+  }
+
+  __host__ __device__ void add(const float2 *input, const size_t N, double max_abs_val) {
+    if (N==0) return;
+    binned_dmdupdate(max_abs_val, 1, 1);
+
+    size_t count = 0;
+    for (size_t i = 0; i < N; i++) {
+      binned_dmddeposit(static_cast<ftype>(input[i].x), 1);
+      binned_dmddeposit(static_cast<ftype>(input[i].y), 1);
+
+      if (N > ENDURANCE && count==ENDURANCE) {
+        binned_dmrenorm(1, 1);
+        count = 0;
+      }
+    }
+  }
+
+  __host__ __device__ void add(const float4 *input, const size_t N) {
+    if (N==0) return;
+
+    auto max_abs_val = abs_max(input[0]);
+    for (size_t i = 1; i < N; i++) max_abs_val = fmax(max_abs_val, abs_max(input[i]));
+
+    add(input, N, max_abs_val);
+  }
+
+  __host__ __device__ void add(const double2 *input, const size_t N) {
+    if (N==0) return;
+
+    auto max_abs_val = abs_max(input[0]);
+    for (size_t i = 1; i < N; i++) max_abs_val = fmax(max_abs_val, abs_max(input[i]));
+
+    add(input, N, max_abs_val);
+  }
+
+  __host__ __device__ void add(const float2 *input, const size_t N) {
+    if (N==0) return;
+
+    auto max_abs_val = abs_max(input[0]);
+    for (size_t i = 1; i < N; i++) max_abs_val = fmax(max_abs_val, abs_max(input[i]));
+
+    add(input, N, max_abs_val);
+  }
+#endif
+
   //////////////////////////////////////
   //MANUAL OPERATIONS; USE WISELY
   //////////////////////////////////////
@@ -704,7 +813,7 @@ private:
   ///Once rebinned, `ENDURANCE` values <= @p mav can be added to the accumulator
   ///with `unsafe_add` after which `renorm()` must be called. See the source of
   ///`add()` for an example
-  template <typename T, typename std::enable_if<std::is_arithmetic<T>::value>::type* = nullptr>
+  template <typename T, typename std::enable_if_t<std::is_arithmetic_v<T>>* = nullptr>
   __host__ __device__ void set_max_abs_val(const T mav){
     binned_dmdupdate(std::abs(mav), 1, 1);
   }
