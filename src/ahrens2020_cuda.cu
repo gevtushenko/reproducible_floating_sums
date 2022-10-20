@@ -151,7 +151,8 @@ void simple_summation(AccumType *result_d, AccumType *partial_d, const thrust::d
 template<class FloatType, class SimpleAccumType>
 FloatType PerformTestsOnData(
   const int TESTS,
-  thrust::host_vector<FloatType> floats //Make a copy so we use the same data for each test
+  thrust::host_vector<FloatType> floats, //Make a copy so we use the same data for each test
+  double ref_max
 ){
   nvtx3::scoped_range r{__func__};
 
@@ -252,7 +253,7 @@ FloatType PerformTestsOnData(
     }
 
     time_deterministic_manyc.start();
-    bitwise_deterministic_summation_manyc<FloatType>(rfa_result_d, rfa_partial_d, floats_d, 1000);
+    bitwise_deterministic_summation_manyc<FloatType>(rfa_result_d, rfa_partial_d, floats_d, ref_max);
     const auto my_val_manyc = rfa_result_h->conv();
     time_deterministic_manyc.stop();
     if(ref_val!=my_val_manyc){
@@ -337,22 +338,24 @@ FloatType PerformTestsOnData(
 template<class FloatType, class SimpleAccumType>
 void PerformTestsOnUniformRandom(const int N, const int TESTS){
   thrust::host_vector<FloatType> input;
+  double ref_max = 1e14;
   {
     nvtx3::scoped_range r{"setup"};
     std::mt19937 gen(123456789);
-    std::uniform_real_distribution<double> distr(-1000, 1000);
+    std::uniform_real_distribution<double> distr(-ref_max, ref_max);
     thrust::host_vector<double> floats;
     for (int i=0;i<N;i++) floats.push_back(distr(gen));
     input = {floats.begin(), floats.end()};
     std::cout<<"Input Data                           = Uniform Random"<<std::endl;
   }
-  PerformTestsOnData<FloatType, SimpleAccumType>(TESTS, input);
+  PerformTestsOnData<FloatType, SimpleAccumType>(TESTS, input, ref_max);
 }
 
 // Use this to make sure the tests are reproducible
 template<class FloatType, class SimpleAccumType>
 void PerformTestsOnSineWaveData(const int N, const int TESTS){
   thrust::host_vector<FloatType> input;
+  double ref_max = 1.0;
   {
     nvtx3::scoped_range r{"setup"};
     input.reserve(N);
@@ -362,7 +365,7 @@ void PerformTestsOnSineWaveData(const int N, const int TESTS){
     }
     std::cout<<"Input Data                           = Sine Wave"<<std::endl;
   }
-  PerformTestsOnData<FloatType, SimpleAccumType>(TESTS, input);
+  PerformTestsOnData<FloatType, SimpleAccumType>(TESTS, input, ref_max);
 }
 
 int main(){
