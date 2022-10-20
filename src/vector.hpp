@@ -12,7 +12,7 @@ template <class T> auto vector_size() { return sizeof(vector_t<T>) / sizeof(T); 
 
 template <class T> auto abs_max(const T&);
 
-template <> __host__ __device__ auto abs_max(const float4 &x) { return fmax( fmaxf(fabs(x.x), fabs(x.y)), fmax(fabs(x.x), fabs(x.y)) ); }
+template <> __host__ __device__ auto abs_max(const float4 &x) { return fmax( fmaxf(fabs(x.x), fabs(x.y)), fmax(fabs(x.z), fabs(x.w)) ); }
 
 template <> __host__ __device__ auto abs_max(const double2 &x) { return fmax(fabs(x.x), fabs(x.y)); }
 
