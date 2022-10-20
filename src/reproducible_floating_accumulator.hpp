@@ -262,13 +262,16 @@ private:
     }else{
       int shift = binned_index() - X_index;
       if(shift > 0){
-        int i;
-        for(i = FOLD - 1; i >= shift; i--){ // spill here ?
+#pragma unroll
+        for(int i = FOLD - 1; i >= 1; i--){
+          if (i < shift) break;
           primary(i * incpriY) = primary((i - shift) * incpriY);
           carry(i * inccarY) = carry((i - shift) * inccarY);
         }
         const ftype *const bins = binned_bins(X_index);
-        for(int j = 0; j < i + 1; j++){
+#pragma unroll
+        for(int j = 0; j < FOLD; j++){
+          if (j >= shift) break;
           primary(j * incpriY) = bins[j];
           carry(j * inccarY) = 0.0;
         }
@@ -284,7 +287,6 @@ private:
   ///@param incpriY stride within Y's primary vector (use every incpriY'th element)
   __host__ __device__ void binned_dmddeposit(const ftype X, const int incpriY){
     ftype M;
-    int i;
     ftype x = X;
 
     if(ISNANINF(x) || ISNANINF(primary(0))){
@@ -303,7 +305,8 @@ private:
       M *= EXPANSION * 0.5;
       x += M;
       x += M;
-      for (i = 1; i < FOLD - 1; i++) {
+#pragma unroll
+      for (int i = 1; i < FOLD - 1; i++) {
         M = primary(i * incpriY);
         qd = x;
         ql |= 1;
@@ -314,11 +317,12 @@ private:
       }
       qd = x;
       ql |= 1;
-      primary(i * incpriY) += qd;
+      primary((FOLD - 1) * incpriY) += qd;
     } else {
       ftype qd = x;
       auto& ql = get_bits(qd);
-      for (i = 0; i < FOLD - 1; i++) {
+#pragma unroll
+      for (int i = 0; i < FOLD - 1; i++) {
         M = primary(i * incpriY);
         qd = x;
         ql |= 1;
@@ -329,7 +333,7 @@ private:
       }
       qd = x;
       ql |= 1;
-      primary(i * incpriY) += qd;
+      primary((FOLD - 1) * incpriY) += qd;
     }
   }
 
@@ -489,20 +493,34 @@ private:
     if(shift > 0){
       const auto *const bins = binned_bins(Y_index);
       //shift Y upwards and add X to Y
-      for (int i = FOLD - 1; i >= shift; i--) {
+#pragma unroll
+      for (int i = FOLD - 1; i >= 1; i--) {
+        if (i < shift) break;
         primary(i*incpriY) = x.primary(i*incpriX) + (primary((i - shift)*incpriY) - bins[i - shift]);
         carry(i*inccarY) = x.carry(i*inccarX) + carry((i - shift)*inccarY);
       }
-      for (int i = 0; i < shift && i < FOLD; i++) {
+#pragma unroll
+      for (int i = 0; i < FOLD; i++) {
+        if (i == shift) break;
         primary(i*incpriY) = x.primary(i*incpriX);
         carry(i*inccarY) = x.carry(i*inccarX);
       }
-    }else{
+    } else if (shift < 0) {
       const auto *const bins = binned_bins(X_index);
       //shift X upwards and add X to Y
-      for (int i = 0 - shift; i < FOLD; i++) {
+#pragma unroll
+      for (int i = 0; i < FOLD; i++) {
+        if (i < -shift) break;
         primary(i*incpriY) += x.primary((i + shift)*incpriX) - bins[i + shift];
         carry(i*inccarY) += x.carry((i + shift)*inccarX);
+      }
+    } else if (shift == 0) {
+      const auto *const bins = binned_bins(X_index);
+      // add X to Y
+#pragma unroll
+      for (int i = 0; i < FOLD; i++) {
+        primary(i*incpriY) += x.primary(i*incpriX) - bins[i];
+        carry(i*inccarY) += x.carry(i*inccarX);
       }
     }
 
