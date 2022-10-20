@@ -387,12 +387,12 @@ int main(){
   }
 
   {
-    nvtx3::scoped_range r{"sine double"};
+    nvtx3::scoped_range r{"sine float"};
     PerformTestsOnSineWaveData<float, float>(N, TESTS);
   }
 
   {
-    nvtx3::scoped_range r{"sine float"};
+    nvtx3::scoped_range r{"sine double"};
     PerformTestsOnSineWaveData<double, double>(N, TESTS);
   }
 
