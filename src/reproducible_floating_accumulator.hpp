@@ -50,7 +50,8 @@ using cuda::std::max;
 #define DISABLE_NANINF
 
 // jump table for indexing into data
-#define JUMP true
+#define MAX_JUMP 5
+static_assert(MAX_JUMP <= 5, "MAX_JUMP greater than max");
 
 template <class ftype> struct RFA_bins
 {
@@ -149,47 +150,47 @@ private:
   __host__ __device__ static inline uint64_t  get_bits(const double &x){ return *reinterpret_cast<const uint64_t*>(&x);}
 
   ///Return primary vector value const ref
-  template <int n = 0> __host__ __device__ __forceinline__ const ftype& primary(int i) const {
-    if constexpr (JUMP && FOLD == 3) {
+  __host__ __device__ __forceinline__ const ftype& primary(int i) const {
+    if constexpr (FOLD <= MAX_JUMP) {
       switch (i) {
-      case 0: return data[0];
-      case 1: return data[1];
-      case 2:
-      default: return data[2];
+      case 0: if constexpr (FOLD >= 1) return data[0];
+      case 1: if constexpr (FOLD >= 2) return data[1];
+      case 2: if constexpr (FOLD >= 3) return data[2];
+      case 3: if constexpr (FOLD >= 4) return data[3];
+      case 4: if constexpr (FOLD >= 5) return data[4];
+      default: return data[FOLD-1];
       }
     } else {
       return data[i];
-      //if (i == n) return data[n];
-      //else if constexpr (n < FOLD -1) return primary<n + 1>(i);
     }
   }
 
   ///Return carry vector value const ref
-  template <int n = 0>  __host__ __device__ __forceinline__ const ftype& carry(int i) const {
-    if constexpr (JUMP && FOLD == 3) {
+  __host__ __device__ __forceinline__ const ftype& carry(int i) const {
+    if constexpr (FOLD <= MAX_JUMP) {
       switch (i) {
-      case 0: return data[0 + FOLD];
-      case 1: return data[1 + FOLD];
-      case 2:
-      default: return data[2 + FOLD];
+      case 0: if constexpr (FOLD >= 1) return data[FOLD + 0];
+      case 1: if constexpr (FOLD >= 2) return data[FOLD + 1];
+      case 2: if constexpr (FOLD >= 3) return data[FOLD + 2];
+      case 3: if constexpr (FOLD >= 4) return data[FOLD + 3];
+      case 4: if constexpr (FOLD >= 5) return data[FOLD + 4];
+      default: return data[2 * FOLD - 1];
       }
     } else {
-      return data[i + FOLD];
-      //if (i == n) return data[n + FOLD];
-      //else if constexpr (n < FOLD - 1) return carry<n + 1>(i);
+      return data[FOLD + i];
     }
   }
 
   ///Return primary vector value ref
-  template <int n = 0>  __host__ __device__ __forceinline__ ftype& primary(int i) {
+  __host__ __device__ __forceinline__ ftype& primary(int i) {
     const auto &c = *this;
-    return const_cast<ftype &>(c.template primary<n>(i));
+    return const_cast<ftype &>(c.primary(i));
   }
 
   ///Return carry vector value ref
-  template <int n = 0> __host__ __device__ __forceinline__ ftype& carry(int i) {
+  __host__ __device__ __forceinline__ ftype& carry(int i) {
     const auto &c = *this;
-    return const_cast<ftype &>(c.template carry<n>(i));
+    return const_cast<ftype &>(c.carry(i));
   }
 
 #ifdef DISABLE_ZERO
