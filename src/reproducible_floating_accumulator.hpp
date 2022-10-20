@@ -99,7 +99,7 @@ template<
   int FOLD_ = 3,
   typename std::enable_if_t<std::is_floating_point<ftype_>::value>* = nullptr
 >
-class ReproducibleFloatingAccumulator {
+class alignas(2 * sizeof(ftype_)) ReproducibleFloatingAccumulator {
 public:
   using ftype = ftype_;
   static constexpr int FOLD = FOLD_;

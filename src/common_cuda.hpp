@@ -42,7 +42,7 @@ __device__ void reduce(T *result, T *partial, T &value, index_t tid)
     auto aggregate = block_sum<block_size>(value);
 
     if (threadIdx.x == 0) {
-      partial[blockIdx.x] = aggregate;
+      partial[blockIdx.x] = aggregate; // non-coalesced write
       __threadfence(); // flush result
 
       // increment global block counter
@@ -57,7 +57,7 @@ __device__ void reduce(T *result, T *partial, T &value, index_t tid)
       auto i = threadIdx.x;
       T sum = { };
       while (i < gridDim.x) {
-        sum += const_cast<T&>(static_cast<volatile T*>(partial)[i]);
+        sum += const_cast<T&>(static_cast<volatile T*>(partial)[i]); // non-coalesced read
         i += blockDim.x;
       }
 
