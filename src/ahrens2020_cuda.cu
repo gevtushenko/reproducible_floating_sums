@@ -299,7 +299,7 @@ FloatType PerformTestsOnData(
   std::cout<<"Ratio Deterministic manyc to Simple       = "<<(time_deterministic_manyc.total/time_simple.total)<<std::endl;
   std::cout<<"Ratio Deterministic manyc to Kahan        = "<<(time_deterministic_manyc.total/time_kahan.total)<<std::endl;
 
-  std::cout<<"Error bound                          = "<<ReproducibleFloatingAccumulator<FloatType>::error_bound(floats.size(), 1000, ref_val)<<std::endl;
+  std::cout<<"Error bound                          = "<<ReproducibleFloatingAccumulator<FloatType>::error_bound(floats.size(), ref_max, ref_val)<<std::endl;
 
   std::cout<<"Reference value                      = "<<std::fixed<<ref_val<<std::endl;
   std::cout<<"Reference bits                       = "<<binrep<FloatType>(ref_val)<<std::endl;
