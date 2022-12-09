@@ -28,6 +28,14 @@ __device__ auto block_sum(T value)
   return BlockReduce(temp_storage).Sum(value);
 }
 
+template <class T> constexpr
+std::enable_if_t<std::is_same_v<T, ReproducibleFloatingAccumulator<typename T::ftype, T::FOLD>>, bool> is_rfa()
+{ return true; }
+
+template <class T> constexpr
+std::enable_if_t<!std::is_same_v<T, ReproducibleFloatingAccumulator<typename T::ftype, T::FOLD>>, bool> is_rfa()
+{ return false; }
+
 template <int block_size, class T, class index_t>
 __device__ void reduce(T *result, T *partial, T &value, index_t tid)
 {
