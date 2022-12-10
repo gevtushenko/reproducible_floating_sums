@@ -511,7 +511,7 @@ private:
       //shift X upwards and add X to Y
 #pragma unroll
       for (int i = 0; i < FOLD; i++) {
-        if (i < -shift) break;
+        if (i < -shift) continue;
         primary(i*incpriY) += x.primary((i + shift)*incpriX) - bins[i + shift];
         carry(i*inccarY) += x.carry((i + shift)*inccarX);
       }
