@@ -37,6 +37,7 @@ using std::min;
 using std::max;
 #else
 #include <cuda/std/array>
+#include <cuda/std/__algorithm_>
 using cuda::std::array;
 using cuda::std::min;
 using cuda::std::max;

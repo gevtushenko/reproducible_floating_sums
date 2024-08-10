@@ -149,19 +149,7 @@ void simple_summation(AccumType *result_d, AccumType *partial_d, const thrust::d
 
 // Timing tests for the summation algorithms
 template<class FloatType, class SimpleAccumType>
-FloatType PerformTestsOnData(
-  const int TESTS,
-  thrust::host_vector<FloatType> floats, //Make a copy so we use the same data for each test
-  double ref_max
-){
-  nvtx3::scoped_range r{__func__};
-
-  Timer time_deterministic_1;
-  Timer time_deterministic_many;
-  Timer time_deterministic_manyc;
-  Timer time_kahan;
-  Timer time_simple;
-
+void PerformTestsOnData(thrust::host_vector<FloatType> floats) {
   // create bins on host and copy to device
   RFA_bins<FloatType> bins;
   bins.initialize_bins();
@@ -200,127 +188,14 @@ FloatType PerformTestsOnData(
   CHECK_CUDA(cudaMalloc(&kahan_partial_d, grid_size * sizeof(kahan<SimpleAccumType>)));
 
   //Very precise output
-  std::cout.precision(std::numeric_limits<FloatType>::max_digits10);
-  std::cout<<std::fixed;
-
-  std::cout<<"'1ata' tests summing many numbers one at a time without a known absolute value caps"<<std::endl;
-  std::cout<<"'many' tests summing many numbers without a known absolute value caps"<<std::endl;
-  std::cout<<"'manyc' tests summing many numbers with a known absolute value caps\n"<<std::endl;
-
-  std::cout<<"Floating type                        = "<<typeid(FloatType).name()<<std::endl;
-  std::cout<<"Simple summation accumulation type   = "<<typeid(SimpleAccumType).name()<<std::endl;
 
   //Get a reference value
   std::unordered_map<FloatType, uint32_t> simple_sums;
   std::unordered_map<FloatType, uint32_t> kahan_sums;
 
-  bitwise_deterministic_summation_1<FloatType>(rfa_result_d, rfa_partial_d, floats);
-  const auto ref_val = rfa_result_h->conv();
-  const auto kahan_ldsum = serial_kahan_summation<long double>(floats);
-  long double ref_diff = std::abs(ref_val - kahan_ldsum);
-  long double simple_max_diff = 0.0;
-  long double kahan_max_diff = 0.0;
-
   thrust::device_vector<FloatType> floats_d = floats;
   thrust::default_random_engine g;
-  for(int test=0;test<TESTS;test++){
-    thrust::shuffle(floats_d.begin(), floats_d.end(), g);
-
-    time_deterministic_1.start();
-    bitwise_deterministic_summation_1<FloatType>(rfa_result_d, rfa_partial_d, floats_d);
-    const auto my_val_1 = rfa_result_h->conv();
-    time_deterministic_1.stop();
-    if(ref_val!=my_val_1){
-      std::cout<<"ERROR: UNEQUAL VALUES ON TEST #"<<test<<" for add-1!"<<std::endl;
-      std::cout<<"Reference      = "<<ref_val                    <<std::endl;
-      std::cout<<"Current        = "<<my_val_1                   <<std::endl;
-      std::cout<<"Reference bits = "<<binrep<FloatType>(ref_val) <<std::endl;
-      std::cout<<"Current   bits = "<<binrep<FloatType>(my_val_1)<<std::endl;
-      throw std::runtime_error("Values were not equal!");
-    }
-
-    time_deterministic_many.start();
-    bitwise_deterministic_summation_many<FloatType>(rfa_result_d, rfa_partial_d, floats_d);
-    const auto my_val_many = rfa_result_h->conv();
-    time_deterministic_many.stop();
-    if(ref_val!=my_val_many){
-      std::cout<<"ERROR: UNEQUAL VALUES ON TEST #"<<test<<" for add-many!"<<std::endl;
-      std::cout<<"Reference      = "<<ref_val                       <<std::endl;
-      std::cout<<"Current        = "<<my_val_many                   <<std::endl;
-      std::cout<<"Reference bits = "<<binrep<FloatType>(ref_val)    <<std::endl;
-      std::cout<<"Current   bits = "<<binrep<FloatType>(my_val_many)<<std::endl;
-      throw std::runtime_error("Values were not equal!");
-    }
-
-    time_deterministic_manyc.start();
-    bitwise_deterministic_summation_manyc<FloatType>(rfa_result_d, rfa_partial_d, floats_d, ref_max);
-    const auto my_val_manyc = rfa_result_h->conv();
-    time_deterministic_manyc.stop();
-    if(ref_val!=my_val_manyc){
-      std::cout<<"ERROR: UNEQUAL VALUES ON TEST #"<<test<<" for add-manyc!"<<std::endl;
-      std::cout<<"Reference      = "<<ref_val                        <<std::endl;
-      std::cout<<"Current        = "<<my_val_manyc                   <<std::endl;
-      std::cout<<"Reference bits = "<<binrep<FloatType>(ref_val)     <<std::endl;
-      std::cout<<"Current   bits = "<<binrep<FloatType>(my_val_manyc)<<std::endl;
-      throw std::runtime_error("Values were not equal!");
-    }
-
-    time_kahan.start();
-    kahan_summation<kahan<SimpleAccumType>, FloatType>(kahan_result_d, kahan_partial_d, floats_d);
-    const auto kahan_sum = kahan_result_h->sum + kahan_result_h->c;
-    if (std::abs(kahan_sum - kahan_ldsum) > kahan_max_diff) kahan_max_diff = std::abs(kahan_sum - kahan_ldsum);
-    kahan_sums[kahan_sum]++;
-    time_kahan.stop();
-
-    time_simple.start();
-    simple_summation<SimpleAccumType, FloatType>(result_d, partial_d, floats_d);
-    const auto simple_sum = *result_h;
-    if (std::abs(simple_sum - kahan_ldsum) > simple_max_diff) simple_max_diff = std::abs(simple_sum - kahan_ldsum);
-    simple_sums[simple_sum]++;
-    time_simple.stop();
-  }
-
-  size_t bytes = floats.size() * sizeof(FloatType);
-
-  std::cout<<"Average deterministic sum 1ata bandwidth  = "<<1e-9*bytes/(time_deterministic_1.total/TESTS)<<" GB/s"<<std::endl;
-  std::cout<<"Average deterministic sum many bandwidth  = "<<1e-9*bytes/(time_deterministic_many.total/TESTS)<<" GB/s"<<std::endl;
-  std::cout<<"Average deterministic sum manyc bandwidth = "<<1e-9*bytes/(time_deterministic_manyc.total/TESTS)<<" GB/s"<<std::endl;
-  std::cout<<"Average simple summation bandwidth        = "<<1e-9*bytes/(time_simple.total/TESTS)<<" GB/s"<<std::endl;
-  std::cout<<"Average Kahan summation bandwidth         = "<<1e-9*bytes/(time_kahan.total/TESTS)<<" GB/s"<<std::endl;
-  std::cout<<"Average deterministic sum 1ata time       = "<<(time_deterministic_1.total/TESTS)<<std::endl;
-  std::cout<<"Average deterministic sum many time       = "<<(time_deterministic_many.total/TESTS)<<std::endl;
-  std::cout<<"Average deterministic sum manyc time      = "<<(time_deterministic_manyc.total/TESTS)<<std::endl;
-  std::cout<<"Average simple summation time             = "<<(time_simple.total/TESTS)<<std::endl;
-  std::cout<<"Average Kahan summation time              = "<<(time_kahan.total/TESTS)<<std::endl;
-  std::cout<<"Ratio Deterministic 1ata to Simple        = "<<(time_deterministic_1.total/time_simple.total)<<std::endl;
-  std::cout<<"Ratio Deterministic 1ata to Kahan         = "<<(time_deterministic_1.total/time_kahan.total)<<std::endl;
-  std::cout<<"Ratio Deterministic many to Simple        = "<<(time_deterministic_many.total/time_simple.total)<<std::endl;
-  std::cout<<"Ratio Deterministic many to Kahan         = "<<(time_deterministic_many.total/time_kahan.total)<<std::endl;
-  std::cout<<"Ratio Deterministic manyc to Simple       = "<<(time_deterministic_manyc.total/time_simple.total)<<std::endl;
-  std::cout<<"Ratio Deterministic manyc to Kahan        = "<<(time_deterministic_manyc.total/time_kahan.total)<<std::endl;
-
-  std::cout<<"Error bound                          = "<<ReproducibleFloatingAccumulator<FloatType>::error_bound(floats.size(), ref_max, ref_val)<<std::endl;
-
-  std::cout<<"Reference value                      = "<<std::fixed<<ref_val<<std::endl;
-  std::cout<<"Reference bits                       = "<<binrep<FloatType>(ref_val)<<std::endl;
-
-  std::cout<<"Kahan long double accumulator value  = "<<kahan_ldsum<<std::endl;
-  std::cout<<"Distinct Kahan values                = "<<kahan_sums.size()<<std::endl;
-  std::cout<<"Distinct Simple values               = "<<simple_sums.size()<<std::endl;
-  std::cout<<"Deterministic deviation              = "<<ref_diff<<std::endl;
-  std::cout<<"Kahan max abs deviation              = "<<kahan_max_diff<<std::endl;
-  std::cout<<"Simple max abs deviation             = "<<simple_max_diff<<std::endl;
-
-#if 0
-  for(const auto &kv: kahan_sums){
-    std::cout<<"Kahan sum values (N="<<std::fixed<<kv.second<<") "<<kv.first<<" ("<<binrep<FloatType>(kv.first)<<")"<<std::endl;
-  }
-
-  for(const auto &kv: simple_sums){
-    std::cout<<"Simple sum values (N="<<std::fixed<<kv.second<<") "<<kv.first<<" ("<<binrep<FloatType>(kv.first)<<")"<<std::endl;
-  }
-#endif
-  std::cout<<std::endl;
+  bitwise_deterministic_summation_many<FloatType>(rfa_result_d, rfa_partial_d, floats_d);
 
   CHECK_CUDA(cudaFree(kahan_partial_d));
   CHECK_CUDA(cudaFreeHost(kahan_result_h));
@@ -330,73 +205,28 @@ FloatType PerformTestsOnData(
 
   CHECK_CUDA(cudaFree(rfa_partial_d));
   CHECK_CUDA(cudaFreeHost(rfa_result_h));
-
-  return ref_val;
 }
 
 // Use this to make sure the tests are reproducible
 template<class FloatType, class SimpleAccumType>
-void PerformTestsOnUniformRandom(const int N, const int TESTS){
+void PerformTestsOnSineWaveData(const int N){
   thrust::host_vector<FloatType> input;
-  double ref_max = 1e14;
   {
-    nvtx3::scoped_range r{"setup"};
-    std::mt19937 gen(123456789);
-    std::uniform_real_distribution<double> distr(-ref_max, ref_max);
-    thrust::host_vector<double> floats;
-    for (int i=0;i<N;i++) floats.push_back(distr(gen));
-    input = {floats.begin(), floats.end()};
-    std::cout<<"Input Data                           = Uniform Random"<<std::endl;
-  }
-  PerformTestsOnData<FloatType, SimpleAccumType>(TESTS, input, ref_max);
-}
-
-// Use this to make sure the tests are reproducible
-template<class FloatType, class SimpleAccumType>
-void PerformTestsOnSineWaveData(const int N, const int TESTS){
-  thrust::host_vector<FloatType> input;
-  double ref_max = 1.0;
-  {
-    nvtx3::scoped_range r{"setup"};
     input.reserve(N);
     // Make a sine wave
     for(int i = 0; i < N; i++){
-      input.push_back(std::sin(2 * M_PI * (i / static_cast<double>(N) - 0.5)));
+      input.push_back(std::sin(i));
     }
-    std::cout<<"Input Data                           = Sine Wave"<<std::endl;
   }
-  PerformTestsOnData<FloatType, SimpleAccumType>(TESTS, input, ref_max);
+  PerformTestsOnData<FloatType, SimpleAccumType>(input);
 }
 
 int main(){
-  const int N = 1'000'000;
-  const int TESTS = 100;
+  int N = 1 << 28;
 
-  std::cout << "Running CUDA parallel summation tests" << std::endl;
-  std::cout << "N = " << N << std::endl;
-  std::cout << "TESTS = " << TESTS << std::endl;
-  std::cout << "grid size = " << grid_size << std::endl;
-  std::cout << "block size = " << block_size << std::endl;
-  std::cout << std::endl;
-
-  {
-    nvtx3::scoped_range r{"uniform float"};
-    PerformTestsOnUniformRandom<float, float>(N, TESTS);
-  }
-
-  {
-    nvtx3::scoped_range r{"uniform double"};
-    PerformTestsOnUniformRandom<double, double>(N, TESTS);
-  }
-
-  {
-    nvtx3::scoped_range r{"sine float"};
-    PerformTestsOnSineWaveData<float, float>(N, TESTS);
-  }
-
-  {
-    nvtx3::scoped_range r{"sine double"};
-    PerformTestsOnSineWaveData<double, double>(N, TESTS);
+  while (N > 1 << 20) {
+    PerformTestsOnSineWaveData<float, float>(N);
+    N >>= 1;
   }
 
   return 0;

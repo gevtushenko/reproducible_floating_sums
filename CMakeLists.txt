@@ -1,4 +1,5 @@
 cmake_minimum_required (VERSION 3.14)
+set(CMAKE_CUDA_ARCHITECTURES 89)
 
 project(deterministic LANGUAGES CXX CUDA)
 
@@ -26,5 +27,5 @@ CPMAddPackage(
 
 add_executable(ahrens2020_cuda src/ahrens2020_cuda.cu)
 target_compile_features(ahrens2020_cuda PRIVATE cxx_std_17)
-target_compile_options(ahrens2020_cuda PRIVATE -Wall -Wextra --expt-relaxed-constexpr -Xptxas="-v" -lineinfo -Wno-unknown-pragmas)
+target_compile_options(ahrens2020_cuda PRIVATE -Wall -Wextra --expt-relaxed-constexpr -lineinfo -Wno-unknown-pragmas)
 target_link_libraries(ahrens2020_cuda PRIVATE nvtx3-cpp)
